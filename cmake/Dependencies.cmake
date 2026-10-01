@@ -10,7 +10,8 @@ endif()
 FetchContent_Declare(
   cutil
   GIT_REPOSITORY https://github.com/20niship/cutil.git
-  GIT_TAG master)
+  GIT_TAG master
+  GIT_SHALLOW TRUE)
 FetchContent_Populate(cutil)
 
 add_library(cutil INTERFACE)
@@ -24,7 +25,8 @@ add_library(cutil::cutil ALIAS cutil)
 FetchContent_Declare(
   eigen
   GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-  GIT_TAG 3.4.0)
+  GIT_TAG 3.4.0
+  GIT_SHALLOW TRUE)
 FetchContent_Populate(eigen)
 
 add_library(Eigen3 INTERFACE)
@@ -35,7 +37,8 @@ add_library(Eigen3::Eigen ALIAS Eigen3)
 FetchContent_Declare(
   vma
   GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-  GIT_TAG v3.1.0)
+  GIT_TAG v3.1.0
+  GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(vma)
 
 # ---- tinyxml2: URDF parsing, vendored as a git submodule -----------------------
