@@ -5,3 +5,5 @@ compile_commands.json
 examples/**/*.json
 examples/**/*.gif
 examples/**/*.mp4
+examples/__pycache__/
+__pycache__/
