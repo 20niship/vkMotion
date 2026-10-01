@@ -111,7 +111,7 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
   MotionGenResult result;
 
   cutil::Ref<WorldConfig> world = config_.world_config ? config_.world_config : cutil::make_ref<WorldConfig>();
-  RobotWorld rw(RobotWorldConfig{config_.robot_config, world, false});
+  RobotWorld rw(RobotWorldConfig{config_.robot_config, world, config_.use_vulkan});
   const RobotConfig& robot = *config_.robot_config;
 
   if(!rw.is_collision_free(start_state) || !rw.is_collision_free(goal_state)) {

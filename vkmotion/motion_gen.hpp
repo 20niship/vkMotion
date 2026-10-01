@@ -14,7 +14,7 @@ struct MotionGenConfig {
   cutil::Ref<RobotConfig> robot_config;
   cutil::Ref<WorldConfig> world_config;  // nullptr: collision ignored
   int num_trajopt_seeds = 12;
-  bool use_vulkan = true;  // TODO: IKSolver/trajectory repairがCPU実装のみのうちは常にCPU経路
+  bool use_vulkan = true;  // 軌道修正時の衝突判定(RobotWorld)に適用。IKSolver内部の衝突判定は現状CPU固定
 
   static MotionGenConfig load_from_robot_config(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config);
 };
