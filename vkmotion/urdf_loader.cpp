@@ -120,6 +120,7 @@ UrdfModel load_urdf(const std::string& path) {
     if(const tinyxml2::XMLElement* limit_el = joint_el->FirstChildElement("limit")) {
       limit_el->QueryFloatAttribute("lower", &joint.limit_lower);
       limit_el->QueryFloatAttribute("upper", &joint.limit_upper);
+      limit_el->QueryFloatAttribute("velocity", &joint.limit_velocity);
     }
     model.joints.push_back(std::move(joint));
   }

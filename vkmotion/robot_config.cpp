@@ -65,6 +65,7 @@ cutil::Ref<RobotConfig> RobotConfig::from_file(const std::string& urdf_path, con
       if(j.name == name) {
         cfg->limits_lower_.push_back(j.limit_lower);
         cfg->limits_upper_.push_back(j.limit_upper);
+        cfg->limits_velocity_.push_back(j.limit_velocity);
         break;
       }
     }

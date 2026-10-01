@@ -20,6 +20,7 @@ struct UrdfJoint {
   cutil::Vec3f axis{1.0f, 0.0f, 0.0f};
   float limit_lower = 0.0f;
   float limit_upper = 0.0f;
+  float limit_velocity = 1.0e6f;  // URDFに無い場合は実質無制限
 };
 
 enum class UrdfGeometryType { kBox, kCylinder, kSphere, kCapsule, kMesh };

@@ -80,6 +80,7 @@ class RobotConfig {
   size_t dof() const;
   const std::vector<float>& joint_position_limits_lower() const;
   const std::vector<float>& joint_position_limits_upper() const;
+  const std::vector<float>& joint_velocity_limits() const;  // URDFの<limit velocity>、無指定なら実質無制限
 };
 
 }  // namespace vkmotion

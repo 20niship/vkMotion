@@ -18,6 +18,7 @@ class RobotConfig {
   size_t dof() const { return joint_names_.size(); }
   const std::vector<float>& joint_position_limits_lower() const { return limits_lower_; }
   const std::vector<float>& joint_position_limits_upper() const { return limits_upper_; }
+  const std::vector<float>& joint_velocity_limits() const { return limits_velocity_; }
   const std::vector<std::string>& link_names() const { return link_names_; }
 
   std::vector<cutil::Mat4f> forward_kinematics(const JointState& joint_state) const;
@@ -31,6 +32,7 @@ class RobotConfig {
   std::vector<std::string> joint_names_;
   std::vector<float> limits_lower_;
   std::vector<float> limits_upper_;
+  std::vector<float> limits_velocity_;
   std::vector<std::string> link_names_;
   std::vector<CollisionSphere> collision_spheres_;
 };
