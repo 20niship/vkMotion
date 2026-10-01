@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(VKMOTION_BUILD_TESTS "Build doctest-based unit tests" OFF)
+option(VKMOTION_BUILD_EXAMPLES "Build example tools (stress-test runner, etc.)" OFF)
 option(VKMOTION_ENABLE_VALIDATION "Enable Vulkan validation layers by default" ON)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -66,4 +67,8 @@ target_compile_definitions(vkmotion PUBLIC
 if(VKMOTION_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(VKMOTION_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()

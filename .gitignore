@@ -2,3 +2,6 @@ build/
 build-*/
 compile_commands.json
 *.spv
+examples/**/*.json
+examples/**/*.gif
+examples/**/*.mp4
