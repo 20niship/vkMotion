@@ -29,6 +29,9 @@ class VkComputePipeline {
   VkPipeline pipeline_              = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet descriptor_set_   = VK_NULL_HANDLE;
+  // 都度alloc/free・create/destroyするとドライバ呼び出しがdispatchの固定コストを支配するため使い回す。
+  VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+  VkFence fence_       = VK_NULL_HANDLE;
 };
 
 }  // namespace vkmotion

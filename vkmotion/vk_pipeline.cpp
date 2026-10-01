@@ -82,9 +82,20 @@ VkComputePipeline::VkComputePipeline(VkContext& ctx, const std::string& spv_path
   set_alloc_info.pSetLayouts        = &set_layout_;
   if(vkAllocateDescriptorSets(ctx_.device(), &set_alloc_info, &descriptor_set_) != VK_SUCCESS)
     throw std::runtime_error("vkAllocateDescriptorSets failed");
+
+  VkCommandBufferAllocateInfo cmd_alloc_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  cmd_alloc_info.commandPool        = ctx_.command_pool();
+  cmd_alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  cmd_alloc_info.commandBufferCount = 1;
+  if(vkAllocateCommandBuffers(ctx_.device(), &cmd_alloc_info, &cmd_) != VK_SUCCESS) throw std::runtime_error("vkAllocateCommandBuffers failed");
+
+  VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  if(vkCreateFence(ctx_.device(), &fence_info, nullptr, &fence_) != VK_SUCCESS) throw std::runtime_error("vkCreateFence failed");
 }
 
 VkComputePipeline::~VkComputePipeline() {
+  if(fence_) vkDestroyFence(ctx_.device(), fence_, nullptr);
+  if(cmd_) vkFreeCommandBuffers(ctx_.device(), ctx_.command_pool(), 1, &cmd_);
   if(descriptor_pool_) vkDestroyDescriptorPool(ctx_.device(), descriptor_pool_, nullptr);
   if(pipeline_) vkDestroyPipeline(ctx_.device(), pipeline_, nullptr);
   if(pipeline_layout_) vkDestroyPipelineLayout(ctx_.device(), pipeline_layout_, nullptr);
@@ -106,36 +117,26 @@ void VkComputePipeline::update_bindings(const std::vector<VkDescriptorBufferInfo
 }
 
 void VkComputePipeline::dispatch(uint32_t group_count_x, const void* push_constants, uint32_t push_constant_bytes) {
-  VkCommandBufferAllocateInfo cmd_alloc_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  cmd_alloc_info.commandPool        = ctx_.command_pool();
-  cmd_alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cmd_alloc_info.commandBufferCount = 1;
-  VkCommandBuffer cmd;
-  if(vkAllocateCommandBuffers(ctx_.device(), &cmd_alloc_info, &cmd) != VK_SUCCESS) throw std::runtime_error("vkAllocateCommandBuffers failed");
+  vkResetCommandBuffer(cmd_, 0);
 
   VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(cmd, &begin_info);
+  vkBeginCommandBuffer(cmd_, &begin_info);
 
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
-  if(push_constant_bytes > 0) vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant_bytes, push_constants);
-  vkCmdDispatch(cmd, group_count_x, 1, 1);
+  vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+  vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
+  if(push_constant_bytes > 0) vkCmdPushConstants(cmd_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant_bytes, push_constants);
+  vkCmdDispatch(cmd_, group_count_x, 1, 1);
 
-  vkEndCommandBuffer(cmd);
+  vkEndCommandBuffer(cmd_);
 
-  VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VkFence fence;
-  vkCreateFence(ctx_.device(), &fence_info, nullptr, &fence);
+  vkResetFences(ctx_.device(), 1, &fence_);
 
   VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit_info.commandBufferCount = 1;
-  submit_info.pCommandBuffers    = &cmd;
-  vkQueueSubmit(ctx_.compute_queue(), 1, &submit_info, fence);
-  vkWaitForFences(ctx_.device(), 1, &fence, VK_TRUE, UINT64_MAX);
-
-  vkDestroyFence(ctx_.device(), fence, nullptr);
-  vkFreeCommandBuffers(ctx_.device(), ctx_.command_pool(), 1, &cmd);
+  submit_info.pCommandBuffers    = &cmd_;
+  vkQueueSubmit(ctx_.compute_queue(), 1, &submit_info, fence_);
+  vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, UINT64_MAX);
 }
 
 }  // namespace vkmotion

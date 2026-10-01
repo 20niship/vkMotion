@@ -52,6 +52,10 @@ void pack_pose(const Pose& p, float pos[4], float quat[4]) {
 
 constexpr uint32_t kLocalSizeX = 64;
 
+void ensure_capacity(VkContext& ctx, std::unique_ptr<VkStorageBuffer>& buf, size_t bytes) {
+  if(!buf || buf->size() < bytes) buf = std::make_unique<VkStorageBuffer>(ctx, std::max<size_t>(bytes, 1));
+}
+
 }  // namespace
 
 VkCollisionPipeline::VkCollisionPipeline(VkContext& ctx) : ctx_(ctx) {
@@ -109,25 +113,25 @@ std::vector<float> VkCollisionPipeline::compute(const std::vector<CollisionSpher
     capsules[i].tip[2]         = o.tip[2];
   }
 
-  VkStorageBuffer robot_spheres_buf(ctx_, robot_spheres.size() * sizeof(float));
-  robot_spheres_buf.upload(robot_spheres.data(), robot_spheres.size() * sizeof(float));
-  VkStorageBuffer cuboids_buf(ctx_, cuboids.size() * sizeof(GpuCuboid));
-  cuboids_buf.upload(cuboids.data(), cuboids.size() * sizeof(GpuCuboid));
-  VkStorageBuffer spheres_buf(ctx_, spheres.size() * sizeof(GpuSphereObstacle));
-  spheres_buf.upload(spheres.data(), spheres.size() * sizeof(GpuSphereObstacle));
-  VkStorageBuffer cylinders_buf(ctx_, cylinders.size() * sizeof(GpuCylinder));
-  cylinders_buf.upload(cylinders.data(), cylinders.size() * sizeof(GpuCylinder));
-  VkStorageBuffer capsules_buf(ctx_, capsules.size() * sizeof(GpuCapsule));
-  capsules_buf.upload(capsules.data(), capsules.size() * sizeof(GpuCapsule));
-  VkStorageBuffer out_buf(ctx_, robot_spheres.size() / 4 * sizeof(float));
+  ensure_capacity(ctx_, robot_spheres_buf_, robot_spheres.size() * sizeof(float));
+  robot_spheres_buf_->upload(robot_spheres.data(), robot_spheres.size() * sizeof(float));
+  ensure_capacity(ctx_, cuboids_buf_, cuboids.size() * sizeof(GpuCuboid));
+  cuboids_buf_->upload(cuboids.data(), cuboids.size() * sizeof(GpuCuboid));
+  ensure_capacity(ctx_, spheres_buf_, spheres.size() * sizeof(GpuSphereObstacle));
+  spheres_buf_->upload(spheres.data(), spheres.size() * sizeof(GpuSphereObstacle));
+  ensure_capacity(ctx_, cylinders_buf_, cylinders.size() * sizeof(GpuCylinder));
+  cylinders_buf_->upload(cylinders.data(), cylinders.size() * sizeof(GpuCylinder));
+  ensure_capacity(ctx_, capsules_buf_, capsules.size() * sizeof(GpuCapsule));
+  capsules_buf_->upload(capsules.data(), capsules.size() * sizeof(GpuCapsule));
+  ensure_capacity(ctx_, out_buf_, robot_spheres.size() / 4 * sizeof(float));
 
   pipeline_->update_bindings({
-      robot_spheres_buf.descriptor_info(),
-      cuboids_buf.descriptor_info(),
-      spheres_buf.descriptor_info(),
-      cylinders_buf.descriptor_info(),
-      capsules_buf.descriptor_info(),
-      out_buf.descriptor_info(),
+      robot_spheres_buf_->descriptor_info(),
+      cuboids_buf_->descriptor_info(),
+      spheres_buf_->descriptor_info(),
+      cylinders_buf_->descriptor_info(),
+      capsules_buf_->descriptor_info(),
+      out_buf_->descriptor_info(),
   });
 
   PushConstants pc{};
@@ -142,7 +146,7 @@ std::vector<float> VkCollisionPipeline::compute(const std::vector<CollisionSpher
   pipeline_->dispatch(group_count, &pc, sizeof(pc));
 
   std::vector<float> result(world_spheres.size());
-  if(!result.empty()) out_buf.download(result.data(), result.size() * sizeof(float));
+  if(!result.empty()) out_buf_->download(result.data(), result.size() * sizeof(float));
   return result;
 }
 
