@@ -1,6 +1,6 @@
 # vkMotion 実装計画
 
-cuMotion (cuRobo) の Vulkan 版を作る。目標は API 互換(関数名・クラス名をできる限り合わせる)と、CPU 実装との GT (Ground Truth) 比較による正当性検証。
+cuMotion (cuRobo) の Vulkan 版を作る。目標は API 互換(関数名・クラス名をできる限り合わせる)と、CPU 実装との GT (Ground Truth) 比較による正当性検証。API の具体的なシグネチャ・使用例は [MANUAL.md](./MANUAL.md) (仮) を参照。
 
 ## 1. cuMotion / cuRobo の技術調査まとめ
 
@@ -112,23 +112,25 @@ REQUIREMENTS.md が要求する CI は「CPUでのmotion planning/衝突判定�
 
 ## 4. ディレクトリ構成(案)
 
+include/とsrc/は分けず、`vkmotion/`直下に `.hpp`/`.cpp`を同じ階層で置く。
+
 ```
 vkMotion/
 ├── CMakeLists.txt
 ├── cmake/                      # FetchContent用のcmakeモジュール
-├── include/vkmotion/
-│   ├── types.hpp               # Obstacle, Cuboid, Cylinder, Capsule, Sphere, WorldConfig
-│   ├── robot_config.hpp
-│   ├── urdf_loader.hpp
-│   ├── fk.hpp
-│   ├── collision/
-│   │   ├── sphere_collision.hpp   # CPUリファレンス実装
-│   │   └── vk_collision.hpp       # Vulkan dispatcher
-│   └── vk/
-│       ├── context.hpp         # instance/device/VMAラッパ
-│       ├── buffer.hpp
-│       └── pipeline.hpp
-├── src/                        # 上記の .cpp 実装
+├── vkmotion/
+│   ├── types.hpp / types.cpp               # Obstacle, Cuboid, Cylinder, Capsule, Sphere, WorldConfig
+│   ├── robot_config.hpp / robot_config.cpp
+│   ├── urdf_loader.hpp / urdf_loader.cpp
+│   ├── kinematics.hpp / kinematics.cpp     # CudaRobotModel相当のFK
+│   ├── sphere_collision.hpp / sphere_collision.cpp  # CPUリファレンス実装
+│   ├── robot_world.hpp / robot_world.cpp            # RobotWorld
+│   ├── ik_solver.hpp / ik_solver.cpp
+│   ├── motion_gen.hpp / motion_gen.cpp
+│   ├── vk_context.hpp / vk_context.cpp     # instance/device/VMAラッパ
+│   ├── vk_buffer.hpp / vk_buffer.cpp
+│   ├── vk_pipeline.hpp / vk_pipeline.cpp
+│   └── vk_collision.hpp / vk_collision.cpp # Vulkan dispatcher
 ├── shaders/                    # *.comp (GLSL), ビルド時にglslcでspvへ
 ├── test_assets/urdf/           # OpenArm, SO101, URシリーズの .urdf のみ(mesh不要)
 ├── tests/
@@ -136,9 +138,13 @@ vkMotion/
 │   ├── test_collision_cpu.cpp
 │   ├── test_collision_gt.cpp   # cuRobo生成のハードコードGTと比較
 │   ├── test_collision_vulkan.cpp
+│   ├── test_ik_solver.cpp
+│   ├── test_motion_gen.cpp
 │   └── CMakeLists.txt
 ├── .github/workflows/ci.yml
 ├── README.md
+├── PLAN.md
+├── MANUAL.md                   # 使い方(仮)。クラス/関数シグネチャの暫定実装計画を兼ねる
 └── REQUIREMENTS.md
 ```
 
@@ -160,7 +166,7 @@ vkMotion/
 
 ## 7. オープン課題 / 要相談事項
 
-- 障害物クラス名を cuRobo そのまま(`Cuboid`)にするか、REQUIREMENTS.mdの「Box」表記に寄せるか → cuRobo互換を優先し`Cuboid`を正式名、エイリアスとして検討
+- 障害物クラス名は cuRobo 互換を優先し `Cuboid` を正式名として採用(決定)。詳細シグネチャは [MANUAL.md](./MANUAL.md) 参照
 - URDFパーサを自作するか軽量ライブラリに頼るか
 - SDFベース障害物(VoxelGrid/ESDF)は初期スコープ外、将来対応
 - MotionGen(軌道最適化本体)のフル実装は工数が大きいため、まずは衝突判定とIKまでを優先し、進捗を見てスコープ調整する
