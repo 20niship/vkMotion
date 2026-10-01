@@ -11,12 +11,22 @@ namespace vkmotion {
 
 namespace {
 
-constexpr int kNumWaypoints         = 21;
-constexpr float kRepairDelta        = 1e-2f;
-constexpr float kRepairStep         = 0.05f;
-constexpr int kRepairMaxIterations  = 80;
-constexpr int kShortcutIterations   = 60;
-constexpr float kMinDt              = 1e-3f;
+constexpr float kRepairDelta             = 1e-2f;
+constexpr float kRepairStep              = 0.05f;
+constexpr int kRepairMaxIterations       = 80;
+constexpr int kShortcutIterations        = 60;
+constexpr float kMinDt                   = 1e-3f;
+// OMPLのlongest_valid_segment_fraction相当。固定waypoint数だと長距離移動で間隔が粗くなり薄い障害物を見逃すため関節空間距離に応じて点数を決める。
+constexpr float kCollisionCheckResolution = 0.03f;  // rad, 隣接waypoint間の最大関節角ステップ
+constexpr int kMinWaypoints               = 11;
+constexpr int kMaxWaypoints               = 400;
+
+int adaptive_waypoint_count(const JointState& a, const JointState& b) {
+  float max_delta = 0.0f;
+  for(size_t j = 0; j < a.position.size(); j++) max_delta = std::max(max_delta, std::abs(a.position[j] - b.position[j]));
+  int n = static_cast<int>(std::ceil(max_delta / kCollisionCheckResolution)) + 1;
+  return std::max(kMinWaypoints, std::min(kMaxWaypoints, n));
+}
 
 std::mt19937& rng() {
   static thread_local std::mt19937 engine(std::random_device{}());
@@ -70,51 +80,87 @@ JointState biased_via_point(const JointState& start, const JointState& goal, con
   return via;
 }
 
-std::vector<JointState> via_point_trajectory(const JointState& start, const JointState& goal, const JointState& via) {
-  int half = kNumWaypoints / 2;
+std::vector<JointState> via_point_trajectory(const JointState& start, const JointState& goal, const JointState& via, int num_waypoints) {
+  int half = num_waypoints / 2;
   auto traj = linear_interpolate(start, via, half);
-  auto rest = linear_interpolate(via, goal, kNumWaypoints - half + 1);
+  auto rest = linear_interpolate(via, goal, num_waypoints - half + 1);
   traj.insert(traj.end(), rest.begin() + 1, rest.end());
   return traj;
 }
 
-// 数値勾配でworld衝突距離を登る局所repair。各反復の2*dof個の摂動状態を1回のdispatchにまとめて評価する(Vulkanでは状態ごとの個別dispatchだと投入コストが支配的になるため)。勾配ゼロ/反復上限は失敗として呼び出し元に再試行させる。
-bool repair_waypoint(const RobotWorld& rw, const RobotConfig& robot, std::vector<float>& q) {
-  std::vector<JointState> single{JointState{q, {}}};
-  if(rw.get_min_world_collision_distance_batch(single)[0] > 0.0f) return true;
+// 衝突している全waypointを同時並行でrepair。1反復=2 dispatchを衝突waypoint数に関わらず固定で払うことで、waypointごとに個別dispatch列を回すより総dispatch数を減らせる。戻り値はqsと同順の成否。
+std::vector<bool> repair_waypoints_batch(const RobotWorld& rw, const RobotConfig& robot, std::vector<std::vector<float>*>& qs) {
+  std::vector<bool> solved(qs.size(), false);
+  if(qs.empty()) return solved;
 
   const auto& lower = robot.joint_position_limits_lower();
   const auto& upper = robot.joint_position_limits_upper();
-  const size_t dof  = q.size();
+  const size_t dof  = qs[0]->size();
 
-  for(int iter = 0; iter < kRepairMaxIterations; iter++) {
+  std::vector<size_t> pending;
+  for(size_t i = 0; i < qs.size(); i++) pending.push_back(i);
+
+  {
+    std::vector<JointState> states;
+    for(size_t idx : pending) states.push_back(JointState{*qs[idx], {}});
+    std::vector<float> dists = rw.get_min_world_collision_distance_batch(states);
+    std::vector<size_t> next;
+    for(size_t k = 0; k < pending.size(); k++) {
+      if(dists[k] > 0.0f) solved[pending[k]] = true;
+      else next.push_back(pending[k]);
+    }
+    pending = std::move(next);
+  }
+
+  for(int iter = 0; iter < kRepairMaxIterations && !pending.empty(); iter++) {
     std::vector<JointState> perturbed;
-    perturbed.reserve(dof * 2);
-    for(size_t i = 0; i < dof; i++) {
-      std::vector<float> qp = q, qm = q;
-      qp[i] += kRepairDelta;
-      qm[i] -= kRepairDelta;
-      perturbed.push_back(JointState{std::move(qp), {}});
-      perturbed.push_back(JointState{std::move(qm), {}});
+    perturbed.reserve(pending.size() * dof * 2);
+    for(size_t idx : pending) {
+      const auto& q = *qs[idx];
+      for(size_t j = 0; j < dof; j++) {
+        std::vector<float> qp = q, qm = q;
+        qp[j] += kRepairDelta;
+        qm[j] -= kRepairDelta;
+        perturbed.push_back(JointState{std::move(qp), {}});
+        perturbed.push_back(JointState{std::move(qm), {}});
+      }
     }
     std::vector<float> dists = rw.get_min_world_collision_distance_batch(perturbed);
 
-    std::vector<float> grad(dof, 0.0f);
-    float norm = 0.0f;
-    for(size_t i = 0; i < dof; i++) {
-      grad[i] = (dists[2 * i] - dists[2 * i + 1]) / (2.0f * kRepairDelta);
-      norm += grad[i] * grad[i];
+    std::vector<size_t> still_moving;
+    size_t offset = 0;
+    for(size_t idx : pending) {
+      auto& q = *qs[idx];
+      std::vector<float> grad(dof, 0.0f);
+      float norm = 0.0f;
+      for(size_t j = 0; j < dof; j++) {
+        grad[j] = (dists[offset + 2 * j] - dists[offset + 2 * j + 1]) / (2.0f * kRepairDelta);
+        norm += grad[j] * grad[j];
+      }
+      offset += dof * 2;
+      norm = std::sqrt(norm);
+      if(norm < 1e-8f) continue;  // 勾配消失、この反復では動かせない
+      for(size_t j = 0; j < dof; j++) {
+        q[j] += kRepairStep * grad[j] / norm;
+        q[j] = std::max(lower[j], std::min(upper[j], q[j]));
+      }
+      still_moving.push_back(idx);
     }
-    norm = std::sqrt(norm);
-    if(norm < 1e-8f) break;
-    for(size_t i = 0; i < dof; i++) {
-      q[i] += kRepairStep * grad[i] / norm;
-      q[i] = std::max(lower[i], std::min(upper[i], q[i]));
+
+    if(!still_moving.empty()) {
+      std::vector<JointState> recheck;
+      for(size_t idx : still_moving) recheck.push_back(JointState{*qs[idx], {}});
+      std::vector<float> redist = rw.get_min_world_collision_distance_batch(recheck);
+      pending.clear();
+      for(size_t k = 0; k < still_moving.size(); k++) {
+        if(redist[k] > 0.0f) solved[still_moving[k]] = true;
+        else pending.push_back(still_moving[k]);
+      }
+    } else {
+      pending.clear();
     }
-    single[0] = JointState{q, {}};
-    if(rw.get_min_world_collision_distance_batch(single)[0] > 0.0f) return true;
   }
-  return false;
+  return solved;
 }
 
 // ランダムな2点[i,j]を直線で結び直し、衝突フリーかつ短くなるなら置き換える標準的なshortcut smoothing。
@@ -208,7 +254,8 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
 
   const int num_seeds        = std::max(1, config_.num_trajopt_seeds);
   const int max_rounds       = std::max(1, plan_config.max_attempts);
-  const int interior_count   = kNumWaypoints - 2;
+  const int num_waypoints    = adaptive_waypoint_count(start_state, goal_state);
+  const int interior_count   = num_waypoints - 2;
 
   for(int round = 0; round < max_rounds; round++) {
     float perturbation_scale = max_rounds > 1 ? static_cast<float>(round) / static_cast<float>(max_rounds - 1) : 0.0f;
@@ -216,10 +263,10 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
     // K本の候補軌道の中間waypointを1回のバッチdispatchで評価する(逐次評価だとVulkanが並列性を活かせないため)。
     std::vector<std::vector<JointState>> seeds;
     seeds.reserve(num_seeds);
-    seeds.push_back(linear_interpolate(start_state, goal_state, kNumWaypoints));
+    seeds.push_back(linear_interpolate(start_state, goal_state, num_waypoints));
     for(int s = 1; s < num_seeds; s++) {
       JointState via = biased_via_point(start_state, goal_state, robot, perturbation_scale);
-      seeds.push_back(via_point_trajectory(start_state, goal_state, via));
+      seeds.push_back(via_point_trajectory(start_state, goal_state, via, num_waypoints));
     }
 
     std::vector<JointState> all_interior;
@@ -241,13 +288,11 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
     }
 
     std::vector<JointState>& traj = seeds[best];
-    bool all_ok                    = true;
-    for(size_t i = 1; i + 1 < traj.size(); i++) {
-      if(!free[best * interior_count + (i - 1)] && !repair_waypoint(rw, robot, traj[i].position)) {
-        all_ok = false;
-        break;
-      }
-    }
+    std::vector<std::vector<float>*> failing;
+    for(size_t i = 1; i + 1 < traj.size(); i++)
+      if(!free[best * interior_count + (i - 1)]) failing.push_back(&traj[i].position);
+    std::vector<bool> repaired = repair_waypoints_batch(rw, robot, failing);
+    bool all_ok                = std::all_of(repaired.begin(), repaired.end(), [](bool b) { return b; });
 
     if(all_ok) {
       shortcut_smooth(rw, traj, kShortcutIterations);
