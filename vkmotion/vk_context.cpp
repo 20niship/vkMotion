@@ -50,7 +50,20 @@ VkContext::VkContext() {
   instance_info.enabledExtensionCount   = static_cast<uint32_t>(extensions.size());
   instance_info.ppEnabledExtensionNames = extensions.data();
 
-  if(vkCreateInstance(&instance_info, nullptr, &instance_) != VK_SUCCESS) throw std::runtime_error("vkCreateInstance failed");
+  VkResult result = vkCreateInstance(&instance_info, nullptr, &instance_);
+  if(result != VK_SUCCESS && validation) {
+    // ディストリ側のvalidation layerパッケージが壊れている環境向けフォールバック。
+    std::fprintf(stderr, "[vulkan] instance creation with validation layer failed (VkResult=%d); retrying without it\n", static_cast<int>(result));
+    validation = false;
+    layers.clear();
+    extensions.clear();
+    instance_info.enabledLayerCount       = 0;
+    instance_info.ppEnabledLayerNames     = nullptr;
+    instance_info.enabledExtensionCount   = 0;
+    instance_info.ppEnabledExtensionNames = nullptr;
+    result = vkCreateInstance(&instance_info, nullptr, &instance_);
+  }
+  if(result != VK_SUCCESS) throw std::runtime_error("vkCreateInstance failed (VkResult=" + std::to_string(static_cast<int>(result)) + ")");
 
   if(validation) {
     VkDebugUtilsMessengerCreateInfoEXT dbg_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
