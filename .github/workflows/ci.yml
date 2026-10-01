@@ -41,6 +41,4 @@ jobs:
 
       - name: Test
         working-directory: build
-        env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: ctest --output-on-failure
