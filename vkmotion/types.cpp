@@ -12,4 +12,8 @@ Pose Pose::from_list(const std::vector<float>& xyzwxyz) {
   return p;
 }
 
+cutil::Mat4f Pose::to_matrix() const {
+  return cutil::mat4_translation(position) * quaternion.to_mat4();
+}
+
 }  // namespace vkmotion
