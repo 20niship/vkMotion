@@ -74,6 +74,32 @@ bool RobotWorld::is_collision_free(const JointState& joint_state) const {
   return true;
 }
 
+std::vector<float> RobotWorld::get_min_world_collision_distance_batch(const std::vector<JointState>& joint_states) const {
+  std::vector<float> result(joint_states.size(), std::numeric_limits<float>::infinity());
+  if(!config_.use_vulkan) {
+    for(size_t i = 0; i < joint_states.size(); i++) {
+      for(float d : get_collision_distance(joint_states[i])) result[i] = std::min(result[i], d);
+    }
+    return result;
+  }
+
+  std::vector<CollisionSphere> all_spheres;
+  std::vector<size_t> spheres_per_state(joint_states.size());
+  for(size_t i = 0; i < joint_states.size(); i++) {
+    std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_states[i]);
+    spheres_per_state[i]                 = spheres.size();
+    all_spheres.insert(all_spheres.end(), spheres.begin(), spheres.end());
+  }
+  std::vector<float> distances = vulkan_pipeline().compute(all_spheres, *config_.world_config);
+
+  size_t offset = 0;
+  for(size_t i = 0; i < joint_states.size(); i++) {
+    for(size_t k = 0; k < spheres_per_state[i]; k++) result[i] = std::min(result[i], distances[offset + k]);
+    offset += spheres_per_state[i];
+  }
+  return result;
+}
+
 std::vector<bool> RobotWorld::is_collision_free_batch(const std::vector<JointState>& joint_states) const {
   if(!config_.use_vulkan) {
     std::vector<bool> results;

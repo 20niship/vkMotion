@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cutil/ref.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "robot_config.hpp"
+#include "robot_world.hpp"
 #include "types.hpp"
 #include "world_config.hpp"
 
@@ -32,18 +34,21 @@ struct MotionGenResult {
   std::string status;
 };
 
-// Pose-goal motion generation (cuRobo: MotionGen). ponytail: L-BFGS+MPPIの代わりに直線補間+距離場勾配の局所repairのみ。
+// Pose-goal motion generation (cuRobo: MotionGen)。RobotWorld(Vulkan込み)はインスタンス生存中1つだけ作り使い回す。
 class MotionGen {
  public:
   explicit MotionGen(const MotionGenConfig& config) : config_(config) {}
 
-  void warmup() {}  // no-op: Vulkanパイプラインのウォームアップは当該経路実装時に追加
+  void warmup();
 
   MotionGenResult plan_single(const JointState& start_state, const Pose& goal_pose, const MotionGenPlanConfig& plan_config = {});
   MotionGenResult plan_single_js(const JointState& start_state, const JointState& goal_state, const MotionGenPlanConfig& plan_config = {});
 
  private:
+  RobotWorld& robot_world();
+
   MotionGenConfig config_;
+  std::unique_ptr<RobotWorld> robot_world_;
 };
 
 }  // namespace vkmotion

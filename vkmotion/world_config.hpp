@@ -17,6 +17,12 @@ class WorldConfig {
   void add_obstacle(const Sphere& obstacle) { sphere_.push_back(obstacle); }
   void add_obstacle(const Cylinder& obstacle) { cylinder_.push_back(obstacle); }
   void add_obstacle(const Capsule& obstacle) { capsule_.push_back(obstacle); }
+  void clear() {
+    cuboid_.clear();
+    sphere_.clear();
+    cylinder_.clear();
+    capsule_.clear();
+  }
 
   const std::vector<Cuboid>& cuboid() const { return cuboid_; }
   const std::vector<Sphere>& sphere() const { return sphere_; }

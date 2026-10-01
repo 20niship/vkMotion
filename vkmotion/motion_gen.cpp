@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <random>
 
 #include "ik_solver.hpp"
@@ -16,13 +15,6 @@ constexpr int kNumWaypoints        = 21;
 constexpr float kRepairDelta       = 1e-2f;
 constexpr float kRepairStep        = 0.05f;
 constexpr int kRepairMaxIterations = 80;
-
-float min_collision_distance(const RobotWorld& rw, const JointState& js) {
-  std::vector<float> d = rw.get_collision_distance(js);
-  float m = std::numeric_limits<float>::infinity();
-  for(float v : d) m = std::min(m, v);
-  return m;
-}
 
 JointState random_state(const RobotConfig& robot) {
   static thread_local std::mt19937 rng(std::random_device{}());
@@ -51,33 +43,41 @@ std::vector<JointState> linear_interpolate(const JointState& a, const JointState
   return out;
 }
 
-// 数値勾配でmin_collision_distanceを登る局所repair。勾配ゼロ/反復上限は失敗として呼び出し元に再試行させる。
+// 数値勾配でworld衝突距離を登る局所repair。各反復の2*dof個の摂動状態を1回のdispatchにまとめて評価する(Vulkanでは状態ごとの個別dispatchだと投入コストが支配的になるため)。勾配ゼロ/反復上限は失敗として呼び出し元に再試行させる。
 bool repair_waypoint(const RobotWorld& rw, const RobotConfig& robot, std::vector<float>& q) {
-  if(min_collision_distance(rw, JointState{q, {}}) > 0.0f) return true;
+  std::vector<JointState> single{JointState{q, {}}};
+  if(rw.get_min_world_collision_distance_batch(single)[0] > 0.0f) return true;
 
   const auto& lower = robot.joint_position_limits_lower();
   const auto& upper = robot.joint_position_limits_upper();
   const size_t dof  = q.size();
 
   for(int iter = 0; iter < kRepairMaxIterations; iter++) {
-    std::vector<float> grad(dof, 0.0f);
+    std::vector<JointState> perturbed;
+    perturbed.reserve(dof * 2);
     for(size_t i = 0; i < dof; i++) {
       std::vector<float> qp = q, qm = q;
       qp[i] += kRepairDelta;
       qm[i] -= kRepairDelta;
-      float fp = min_collision_distance(rw, JointState{qp, {}});
-      float fm = min_collision_distance(rw, JointState{qm, {}});
-      grad[i]  = (fp - fm) / (2.0f * kRepairDelta);
+      perturbed.push_back(JointState{std::move(qp), {}});
+      perturbed.push_back(JointState{std::move(qm), {}});
     }
+    std::vector<float> dists = rw.get_min_world_collision_distance_batch(perturbed);
+
+    std::vector<float> grad(dof, 0.0f);
     float norm = 0.0f;
-    for(float g : grad) norm += g * g;
+    for(size_t i = 0; i < dof; i++) {
+      grad[i] = (dists[2 * i] - dists[2 * i + 1]) / (2.0f * kRepairDelta);
+      norm += grad[i] * grad[i];
+    }
     norm = std::sqrt(norm);
     if(norm < 1e-8f) break;
     for(size_t i = 0; i < dof; i++) {
       q[i] += kRepairStep * grad[i] / norm;
       q[i] = std::max(lower[i], std::min(upper[i], q[i]));
     }
-    if(min_collision_distance(rw, JointState{q, {}}) > 0.0f) return true;
+    single[0] = JointState{q, {}};
+    if(rw.get_min_world_collision_distance_batch(single)[0] > 0.0f) return true;
   }
   return false;
 }
@@ -89,6 +89,20 @@ MotionGenConfig MotionGenConfig::load_from_robot_config(cutil::Ref<RobotConfig> 
   cfg.robot_config = robot_config;
   cfg.world_config = world_config;
   return cfg;
+}
+
+RobotWorld& MotionGen::robot_world() {
+  if(!robot_world_) {
+    cutil::Ref<WorldConfig> world = config_.world_config ? config_.world_config : cutil::make_ref<WorldConfig>();
+    robot_world_                  = std::make_unique<RobotWorld>(RobotWorldConfig{config_.robot_config, world, config_.use_vulkan});
+  }
+  return *robot_world_;
+}
+
+void MotionGen::warmup() {
+  RobotWorld& rw = robot_world();
+  JointState dummy{std::vector<float>(config_.robot_config->dof(), 0.0f), {}};
+  rw.is_collision_free(dummy);  // Vulkanパイプラインの初回dispatchをここで強制する
 }
 
 MotionGenResult MotionGen::plan_single(const JointState& start_state, const Pose& goal_pose, const MotionGenPlanConfig& plan_config) {
@@ -110,8 +124,7 @@ MotionGenResult MotionGen::plan_single(const JointState& start_state, const Pose
 MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const JointState& goal_state, const MotionGenPlanConfig& plan_config) {
   MotionGenResult result;
 
-  cutil::Ref<WorldConfig> world = config_.world_config ? config_.world_config : cutil::make_ref<WorldConfig>();
-  RobotWorld rw(RobotWorldConfig{config_.robot_config, world, config_.use_vulkan});
+  RobotWorld& rw            = robot_world();
   const RobotConfig& robot = *config_.robot_config;
 
   if(!rw.is_collision_free(start_state) || !rw.is_collision_free(goal_state)) {
@@ -133,9 +146,12 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
       traj.insert(traj.end(), second_half.begin() + 1, second_half.end());
     }
 
+    std::vector<JointState> interior(traj.begin() + 1, traj.end() - 1);
+    std::vector<bool> interior_free = rw.is_collision_free_batch(interior);
+
     bool all_ok = true;
     for(size_t i = 1; i + 1 < traj.size(); i++) {
-      if(!rw.is_collision_free(traj[i]) && !repair_waypoint(rw, robot, traj[i].position)) {
+      if(!interior_free[i - 1] && !repair_waypoint(rw, robot, traj[i].position)) {
         all_ok = false;
         break;
       }

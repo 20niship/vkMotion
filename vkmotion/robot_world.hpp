@@ -29,6 +29,8 @@ class RobotWorld {
   std::vector<float> get_self_collision_distance(const JointState& joint_state) const;
   bool is_collision_free(const JointState& joint_state) const;
   std::vector<bool> is_collision_free_batch(const std::vector<JointState>& joint_states) const;
+  // 世界障害物との最小符号付き距離(自己衝突は含まない)を状態ごとに1回のdispatchでまとめて返す。
+  std::vector<float> get_min_world_collision_distance_batch(const std::vector<JointState>& joint_states) const;
 
  private:
   RobotWorldConfig config_;
