@@ -4,6 +4,8 @@
 #include <limits>
 
 #include "sphere_collision.hpp"
+#include "vk_collision.hpp"
+#include "vk_context.hpp"
 
 namespace vkmotion {
 
@@ -13,6 +15,8 @@ RobotWorld::RobotWorld(const RobotWorldConfig& config) : config_(config) {
   }
 }
 
+RobotWorld::~RobotWorld() = default;
+
 bool RobotWorld::is_adjacent(const std::string& a, const std::string& b) const {
   for(const auto& pair : adjacent_links_) {
     if((pair.first == a && pair.second == b) || (pair.first == b && pair.second == a)) return true;
@@ -20,9 +24,17 @@ bool RobotWorld::is_adjacent(const std::string& a, const std::string& b) const {
   return false;
 }
 
+VkCollisionPipeline& RobotWorld::vulkan_pipeline() const {
+  if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
+  if(!vk_collision_) vk_collision_ = std::make_unique<VkCollisionPipeline>(*vk_ctx_);
+  return *vk_collision_;
+}
+
 std::vector<float> RobotWorld::get_collision_distance(const JointState& joint_state) const {
   std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_state);
   const WorldConfig& world             = *config_.world_config;
+
+  if(config_.use_vulkan) return vulkan_pipeline().compute(spheres, world);
 
   std::vector<float> distances;
   distances.reserve(spheres.size());
@@ -63,9 +75,34 @@ bool RobotWorld::is_collision_free(const JointState& joint_state) const {
 }
 
 std::vector<bool> RobotWorld::is_collision_free_batch(const std::vector<JointState>& joint_states) const {
-  std::vector<bool> results;
-  results.reserve(joint_states.size());
-  for(const auto& js : joint_states) results.push_back(is_collision_free(js));
+  if(!config_.use_vulkan) {
+    std::vector<bool> results;
+    results.reserve(joint_states.size());
+    for(const auto& js : joint_states) results.push_back(is_collision_free(js));
+    return results;
+  }
+
+  std::vector<CollisionSphere> all_spheres;
+  std::vector<size_t> spheres_per_state(joint_states.size());
+  for(size_t i = 0; i < joint_states.size(); i++) {
+    std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_states[i]);
+    spheres_per_state[i]                 = spheres.size();
+    all_spheres.insert(all_spheres.end(), spheres.begin(), spheres.end());
+  }
+  std::vector<float> distances = vulkan_pipeline().compute(all_spheres, *config_.world_config);
+
+  std::vector<bool> results(joint_states.size());
+  size_t offset = 0;
+  for(size_t i = 0; i < joint_states.size(); i++) {
+    bool free = true;
+    for(size_t k = 0; k < spheres_per_state[i]; k++)
+      if(distances[offset + k] <= 0.0f) free = false;
+    offset += spheres_per_state[i];
+    if(free)
+      for(float d : get_self_collision_distance(joint_states[i]))
+        if(d <= 0.0f) free = false;
+    results[i] = free;
+  }
   return results;
 }
 

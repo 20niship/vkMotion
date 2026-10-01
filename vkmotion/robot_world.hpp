@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cutil/ref.hpp>
+#include <memory>
 #include <vector>
 
 #include "robot_config.hpp"
@@ -9,16 +10,20 @@
 
 namespace vkmotion {
 
+class VkContext;
+class VkCollisionPipeline;
+
 struct RobotWorldConfig {
   cutil::Ref<RobotConfig> robot_config;
   cutil::Ref<WorldConfig> world_config;
-  bool use_vulkan = true;  // TODO: フェーズ3でVulkan compute実装。現状は無視し常にCPUで計算する。
+  bool use_vulkan = true;
 };
 
 // Robot-world and self collision queries (cuRobo: curobo.wrap.model.robot_world.RobotWorld).
 class RobotWorld {
  public:
   explicit RobotWorld(const RobotWorldConfig& config);
+  ~RobotWorld();
 
   std::vector<float> get_collision_distance(const JointState& joint_state) const;
   std::vector<float> get_self_collision_distance(const JointState& joint_state) const;
@@ -29,8 +34,11 @@ class RobotWorld {
   RobotWorldConfig config_;
   // Unordered pairs of link names that share a joint; excluded from self-collision checks.
   std::vector<std::pair<std::string, std::string>> adjacent_links_;
+  mutable std::unique_ptr<VkContext> vk_ctx_;
+  mutable std::unique_ptr<VkCollisionPipeline> vk_collision_;
 
   bool is_adjacent(const std::string& a, const std::string& b) const;
+  VkCollisionPipeline& vulkan_pipeline() const;
 };
 
 }  // namespace vkmotion
