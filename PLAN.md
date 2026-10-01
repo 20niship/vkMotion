@@ -11,7 +11,9 @@ cuMotion (cuRobo) の Vulkan 版を作る。目標は API 互換(関数名・ク
 - ロボットは **衝突球 (collision spheres)** の集合で近似する。メッシュを使わず、各リンクに対して複数の球 `{center: [x,y,z], radius: r}` を割り当てる。
 - 球中心はリンクのローカル座標系で定義され、FK で得たリンク姿勢を使ってワールド座標に変換する。
 - 球同士・球と障害物の距離計算だけで全身衝突判定が完結するため、GPU で大量並列に投げても軽い。
-- 球モデルは別途 YAML 等で定義し、URDF (リンク・ジョイント・DH/軸情報) とは別ファイルで管理する。
+- cuRobo本家は、リンクの衝突メッシュに対してスフィアフィッティング(`generate_collision_spheres`系のツール)を事前実行し、結果を球モデルYAMLとして保存・手動調整して使う(実行時に毎回メッシュから計算はしない)。
+
+**vkMotionでの方針**: REQUIREMENTS.md により URDF はメッシュ無しの純粋な`.urdf`で、各リンクの`<collision>`は`<box>`/`<cylinder>`/`<sphere>`等のプリミティブ形状になる。よって cuRobo のように外部メッシュに対する事前スフィアフィッティングは不要で、**URDFの`<collision>`プリミティブから衝突球をロード時に自動生成**できる(円柱なら軸方向にスタックした複数球、ボックスならOBBを覆う複数球、球ならそのまま1球)。これにより別YAMLが必須ではなくなる。ただし自動生成した球は粗いため、**手動調整用に球モデルYAMLで明示的に上書きできるオプションも残す**(球数・半径のチューニング用、cuRoboの手動調整ワークフローに相当)。
 
 ### 1.2 障害物表現 (`WorldConfig` / `Obstacle`)
 
@@ -76,15 +78,18 @@ REQUIREMENTS.md が要求する CI は「CPUでのmotion planning/衝突判定�
 ### フェーズ0: プロジェクト基盤
 - CMakeLists.txt (トップレベル)
 - cutilをFetchContentまたはsubmoduleで取得、`Vec3f`/`Mat4f`/`Ref`等を使用
+- tinyxml2を`third_party/tinyxml2`にgit submoduleとして追加、CMakeから`add_subdirectory`
+- Eigenをheader-onlyでFetchContent
 - doctestをCMakeオプション(`VKMOTION_BUILD_TESTS`)でFetchContent取得、有効時のみctest登録
 - Vulkan SDK前提のfind_package、validation layer有効化オプション
-- GitHub Actions CIの土台(ビルドのみ)
+- GitHub Actions CIの土台(ビルドのみ、`submodules: recursive`でcheckout)
 
 ### フェーズ1: URDF読み込み + FK (CPU)
-- 軽量URDFパーサ(自作 or tinyxml2ベース、joint tree・origin・axis・limitのみ対応。メッシュ参照は無視)
+- 軽量URDFパーサ(tinyxml2ベース、joint tree・origin・axis・limit・`<collision>`プリミティブのみ対応。メッシュ参照は無視)
 - 順運動学 (FK): ジョイント角度配列 → 各リンクのワールド姿勢
-- 衝突球モデル用YAMLローダー(リンク名 → 球リスト)
-- doctestでFK単体テスト
+- URDFの`<collision>`プリミティブ(box/cylinder/sphere)から衝突球を自動生成するロジック
+- 球モデルYAMLローダー(自動生成結果を上書きする手動調整用、任意)
+- doctestでFK単体テスト、自動球生成の単体テスト
 
 ### フェーズ2: 障害物表現 + CPU衝突判定
 - `Obstacle`基底 + `Cuboid`/`Cylinder`/`Capsule`/`Sphere` (cuRobo命名互換)
@@ -118,6 +123,8 @@ include/とsrc/は分けず、`vkmotion/`直下に `.hpp`/`.cpp`を同じ階層�
 vkMotion/
 ├── CMakeLists.txt
 ├── cmake/                      # FetchContent用のcmakeモジュール
+├── third_party/
+│   └── tinyxml2/                # git submodule
 ├── vkmotion/
 │   ├── types.hpp / types.cpp               # Obstacle, Cuboid, Cylinder, Capsule, Sphere, WorldConfig
 │   ├── robot_config.hpp / robot_config.cpp
@@ -154,7 +161,8 @@ vkMotion/
 - [doctest](https://github.com/doctest/doctest): テスト用、CMakeオプションで有効時のみFetchContent
 - Vulkan SDK (loader + validation layer)
 - [VMA (Vulkan Memory Allocator)](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator): FetchContent
-- URDFパーサ: tinyxml2をFetchContentし自前で最小限のURDFパーサを書く方針(フル機能のurdfdomは依存が重いため見送り、要検討)
+- [tinyxml2](https://github.com/leethomason/tinyxml2): URDFパース用。**git submodule**として`third_party/tinyxml2`に配置(フル機能のurdfdomは依存が重いため見送り、URDF読み込みは自前実装)
+- [Eigen](https://eigen.tuxfamily.org/): IKSolverのヤコビアン擬似逆行列計算(SVD/減衰最小二乗法)に使用。ヘッダオンリーなのでFetchContent。cutilのVec/Matは固定サイズ用途、可変サイズの線形代数(Jacobian: 6×DOF)はEigenに任せる
 
 ## 6. CI/CD方針
 
@@ -167,6 +175,7 @@ vkMotion/
 ## 7. オープン課題 / 要相談事項
 
 - 障害物クラス名は cuRobo 互換を優先し `Cuboid` を正式名として採用(決定)。詳細シグネチャは [MANUAL.md](./MANUAL.md) 参照
-- URDFパーサを自作するか軽量ライブラリに頼るか
+- URDFパーサは tinyxml2(git submodule)を使い自前実装(決定)
+- 衝突球は URDF の `<collision>` プリミティブから自動生成し、YAMLは手動調整の上書き用オプションとする(決定)
 - SDFベース障害物(VoxelGrid/ESDF)は初期スコープ外、将来対応
 - MotionGen(軌道最適化本体)のフル実装は工数が大きいため、まずは衝突判定とIKまでを優先し、進捗を見てスコープ調整する

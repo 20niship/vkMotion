@@ -15,10 +15,9 @@ using namespace vkmotion;
 using namespace cutil;
 
 int main() {
-  // 1. ロボット構成を読み込む(URDF + 衝突球YAML)
-  Ref<RobotConfig> robot_cfg = RobotConfig::from_file(
-      "test_assets/urdf/ur5e.urdf",
-      "test_assets/spheres/ur5e.yml");
+  // 1. ロボット構成を読み込む。URDFの<collision>プリミティブから衝突球を自動生成する
+  //    (第2引数省略時)。手動チューニング済みの球を使うなら第2引数にYAMLパスを渡す。
+  Ref<RobotConfig> robot_cfg = RobotConfig::from_file("test_assets/urdf/ur5e.urdf");
 
   // 2. 障害物を含むワールドを構築する
   Ref<WorldConfig> world_cfg = WorldConfig::from_file("test_assets/world/table_scene.yml");
@@ -71,9 +70,11 @@ struct Pose {
 
 class RobotConfig {
  public:
-  // URDF(関節構造)と衝突球定義YAML(リンク名 -> 球リスト)を読み込む
+  // URDFを読み込む。collision_spheres_yaml_pathが空なら、URDFの各リンク<collision>
+  // プリミティブ(box/cylinder/sphere)から衝突球を自動生成する。
+  // 非空ならそのYAMLの内容で球定義を上書き(手動チューニング用)。
   static cutil::Ref<RobotConfig> from_file(const std::string& urdf_path,
-                                            const std::string& collision_spheres_yaml_path);
+                                            const std::string& collision_spheres_yaml_path = "");
 
   const std::vector<std::string>& joint_names() const;
   size_t dof() const;
@@ -84,8 +85,13 @@ class RobotConfig {
 }  // namespace vkmotion
 ```
 
-- `from_file` は cuRobo の `RobotConfig.from_dict()` に相当(cuRoboはYAML dict、vkMotionはURDF + 球YAMLの2ファイル)。
-- 衝突球YAMLフォーマット(案、cuRoboの`collision_spheres`キーに準拠):
+- `from_file` は cuRobo の `RobotConfig.from_dict()` に相当(cuRoboはYAML dictで球モデルを必須指定するが、vkMotionはメッシュ無し純粋URDF前提のため URDF の `<collision>` プリミティブから自動生成するのがデフォルト)。
+- 自動生成ロジック(`vkmotion/urdf_loader.hpp` 内、`generate_collision_spheres_from_urdf`):
+  - `<sphere radius="r">` → 中心に1球、半径そのまま
+  - `<cylinder radius="r" length="l">` → 軸方向に `ceil(l / (2r))` 個の球を等間隔でスタック
+  - `<box size="x y z">` → OBBを包含するよう軸ごとに球をグリッド配置(球半径は最短辺の半分程度)
+  - `<capsule>`(URDF拡張) → 両端+軸上に等間隔で球配置
+- 手動調整用の球モデルYAMLフォーマット(案、cuRoboの`collision_spheres`キーに準拠。上書き時のみ使用):
 
 ```yaml
 collision_spheres:
@@ -198,6 +204,8 @@ class IKSolver {
 
 }  // namespace vkmotion
 ```
+
+- CPUリファレンス実装(`solve_single`の内部)はヤコビアンの減衰最小二乗法(DLS)で解く。ヤコビアンは`6×dof`の可変サイズ行列なので cutil の固定長 `Mat4f` ではなく **Eigen** (`Eigen::MatrixXd` + `Eigen::JacobiSVD`等) を使う。Vulkan compute版は同じDLS更新式をGLSLで並列化(シード毎に1スレッド)したもの。
 
 ## 5. `MotionGen` — Pose指定プランニング(本題)
 
