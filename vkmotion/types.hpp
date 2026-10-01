@@ -21,4 +21,11 @@ struct Pose {
   static Pose from_list(const std::vector<float>& xyzwxyz);
 };
 
+// Sphere approximating part of the robot itself (not an Obstacle); center is in the owning link's local frame.
+struct CollisionSphere {
+  std::string link_name;
+  cutil::Vec3f center{};
+  float radius = 0.0f;
+};
+
 }  // namespace vkmotion
