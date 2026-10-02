@@ -58,7 +58,8 @@ TEST_CASE("RobotWorld: GPU repair_waypoints (GPU常駐FK+勾配降下) matches C
   RobotWorld cpu(RobotWorldConfig{robot, world, false});
   RobotWorld gpu(RobotWorldConfig{robot, world, true});
 
-  std::vector<float> q_cpu = {0.5f, 0.0f};  // on the blocked arc midpoint, in collision
+  // 0.5だと障害物球の掃過弧の最近接点ちょうどで距離の勾配が解析的にゼロ(鞍点)になるため少しずらす。
+  std::vector<float> q_cpu = {0.52f, 0.0f};
   std::vector<float> q_gpu = q_cpu;
   std::vector<std::vector<float>*> qs_cpu = {&q_cpu};
   std::vector<std::vector<float>*> qs_gpu = {&q_gpu};
@@ -87,7 +88,7 @@ TEST_CASE("RobotWorld: GPU repair_waypoints handles multiple waypoints in one di
 
   RobotWorld gpu(RobotWorldConfig{robot, world, true});
 
-  std::vector<float> q0 = {0.5f, 0.0f};   // in collision
+  std::vector<float> q0 = {0.52f, 0.0f};  // in collision, off the zero-gradient saddle at 0.5
   std::vector<float> q1 = {-1.0f, 0.4f};  // far from the obstacle, already free
   std::vector<std::vector<float>*> qs = {&q0, &q1};
 

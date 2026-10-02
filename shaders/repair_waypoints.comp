@@ -137,8 +137,8 @@ float min_world_distance(vec3 center, float radius) {
 
 shared float s_q[MAX_DOF];
 shared float s_dists[2 * MAX_DOF + 1];
-shared bool s_solved;
-shared bool s_stuck;
+shared uint s_solved;
+shared uint s_stuck;
 
 // FKを計算し、ロボット全球のうち障害物への最小符号付き距離を返す(vkmotion::kinematics.cppのFKを移植)。
 float evaluate(float q_local[MAX_DOF]) {
@@ -184,8 +184,8 @@ void main() {
 
   if(tid < dof) s_q[tid] = initial_q[wp * dof + tid];
   if(tid == 0) {
-    s_solved = false;
-    s_stuck = false;
+    s_solved = 0u;
+    s_stuck = 0u;
   }
   barrier();
 
@@ -205,7 +205,7 @@ void main() {
     if(tid == 0) {
       float center_dist = s_dists[2 * dof];
       if(center_dist > 0.0) {
-        s_solved = true;
+        s_solved = 1u;
       } else {
         float grad[MAX_DOF];
         float norm = 0.0;
@@ -215,7 +215,7 @@ void main() {
         }
         norm = sqrt(norm);
         if(norm < 1e-8) {
-          s_stuck = true;
+          s_stuck = 1u;
         } else {
           for(uint j = 0; j < dof; j++) {
             float v = s_q[j] + pc.repair_step * grad[j] / norm;
@@ -225,9 +225,9 @@ void main() {
       }
     }
     barrier();
-    if(s_solved || s_stuck) break;
+    if(s_solved != 0u || s_stuck != 0u) break;
   }
 
   if(tid < dof) out_q[wp * dof + tid] = s_q[tid];
-  if(tid == 0) out_success[wp] = s_solved ? 1u : 0u;
+  if(tid == 0) out_success[wp] = s_solved;
 }
