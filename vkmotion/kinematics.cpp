@@ -2,6 +2,7 @@
 
 #include <cutil/quaternion.hpp>
 #include <functional>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -69,6 +70,43 @@ std::vector<cutil::Mat4f> forward_kinematics(const UrdfModel& model, const std::
   }
 
   return link_world;
+}
+
+SerialChain build_serial_chain(const UrdfModel& model) {
+  std::unordered_map<std::string, std::vector<int>> children_of;
+  std::unordered_set<std::string> child_links;
+  for(size_t i = 0; i < model.joints.size(); i++) {
+    children_of[model.joints[i].parent_link].push_back(static_cast<int>(i));
+    child_links.insert(model.joints[i].child_link);
+  }
+
+  std::string root_link;
+  for(const auto& link : model.links) {
+    if(child_links.find(link.name) == child_links.end()) {
+      root_link = link.name;
+      break;
+    }
+  }
+  if(root_link.empty()) throw std::runtime_error("vkmotion: build_serial_chain found no root link");
+
+  SerialChain chain;
+  chain.link_depth.assign(model.links.size(), -1);
+  int root_idx = model.find_link(root_link);
+  if(root_idx >= 0) chain.link_depth[static_cast<size_t>(root_idx)] = 0;
+
+  std::string current = root_link;
+  while(true) {
+    auto it = children_of.find(current);
+    if(it == children_of.end() || it->second.empty()) break;
+    if(it->second.size() > 1) throw std::runtime_error("vkmotion: build_serial_chain does not support branching link '" + current + "'");
+
+    int joint_idx = it->second[0];
+    chain.joint_order.push_back(joint_idx);
+    current           = model.joints[static_cast<size_t>(joint_idx)].child_link;
+    int link_idx       = model.find_link(current);
+    if(link_idx >= 0) chain.link_depth[static_cast<size_t>(link_idx)] = static_cast<int>(chain.joint_order.size());
+  }
+  return chain;
 }
 
 }  // namespace vkmotion

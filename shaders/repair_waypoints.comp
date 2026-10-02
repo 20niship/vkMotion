@@ -1,0 +1,233 @@
+#version 450
+
+// GPU常駐の衝突回避repair。FK+数値勾配降下の反復全体を1 dispatch内でシェーダがループし、
+// ホスト-GPU往復(1反復=1〜2 dispatch)を無くす。1ワークグループ=1waypoint。
+// quat_rotate/distance_sphere_*はshaders/robot_collision.compと重複、変更時は両方揃えること。
+// 直列チェーン限定(分岐ロボット非対応)。IKSolverも同じ制約を既に持つ。
+
+layout(local_size_x = 64) in;
+
+const int MAX_DOF = 16;
+const int MAX_JOINTS = 16;
+
+struct GpuJoint {
+  vec4 origin_pos;   // xyz, w unused
+  vec4 origin_quat;  // xyzw
+  vec4 axis;         // xyz, w unused
+  ivec4 meta;        // x: 0=revolute/continuous 1=prismatic 2=fixed, y: index into q[] (-1 if fixed)
+};
+struct GpuRobotSphere {
+  vec4 center_radius;  // xyz = local center, w = radius
+  ivec4 depth_pad;     // x = depth (apply joint_order[0..depth-1] to reach this link)
+};
+struct GpuCuboid {
+  vec4 pos;
+  vec4 quat;
+  vec4 dims;
+};
+struct GpuSphereObstacle {
+  vec4 pos_radius;
+};
+struct GpuCylinder {
+  vec4 pos;
+  vec4 quat;
+  vec4 radius_height;
+};
+struct GpuCapsule {
+  vec4 pos;
+  vec4 quat;
+  vec4 base_radius;
+  vec4 tip;
+};
+
+layout(std430, binding = 0) readonly buffer Joints { GpuJoint joints[]; };
+layout(std430, binding = 1) readonly buffer RobotSpheres { GpuRobotSphere robot_spheres[]; };
+layout(std430, binding = 2) readonly buffer DofLimits { vec2 dof_limits[]; };
+layout(std430, binding = 3) readonly buffer Cuboids { GpuCuboid cuboids[]; };
+layout(std430, binding = 4) readonly buffer SphereObstacles { GpuSphereObstacle sphere_obstacles[]; };
+layout(std430, binding = 5) readonly buffer Cylinders { GpuCylinder cylinders[]; };
+layout(std430, binding = 6) readonly buffer Capsules { GpuCapsule capsules[]; };
+layout(std430, binding = 7) readonly buffer InitialQ { float initial_q[]; };
+layout(std430, binding = 8) writeonly buffer OutQ { float out_q[]; };
+layout(std430, binding = 9) writeonly buffer OutSuccess { uint out_success[]; };
+
+layout(push_constant) uniform PushConstants {
+  uint num_joints;
+  uint num_dof;
+  uint num_robot_spheres;
+  uint num_cuboids;
+  uint num_sphere_obstacles;
+  uint num_cylinders;
+  uint num_capsules;
+  uint max_iterations;
+  float repair_step;
+  float repair_delta;
+}
+pc;
+
+vec4 quat_conj(vec4 q) { return vec4(-q.xyz, q.w); }
+
+vec3 quat_rotate(vec4 q, vec3 v) {
+  vec3 u = q.xyz;
+  float s = q.w;
+  return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
+}
+
+vec4 quat_mul(vec4 a, vec4 b) {
+  return vec4(a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+              a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+
+vec3 to_local(vec3 world_point, vec4 pos, vec4 quat) {
+  vec3 d = world_point - pos.xyz;
+  float n2 = max(dot(quat, quat), 1e-12);
+  vec4 inv = quat_conj(quat) / n2;
+  return quat_rotate(inv, d);
+}
+
+float distance_sphere_cuboid(vec3 center, float radius, GpuCuboid c) {
+  vec3 local = to_local(center, c.pos, c.quat);
+  vec3 half_extent = c.dims.xyz * 0.5;
+  vec3 q = abs(local) - half_extent;
+  vec3 q_pos = max(q, vec3(0.0));
+  float outside = length(q_pos);
+  float inside = min(max(q.x, max(q.y, q.z)), 0.0);
+  return outside + inside - radius;
+}
+
+float distance_sphere_sphere(vec3 center, float radius, GpuSphereObstacle s) {
+  float d = length(center - s.pos_radius.xyz);
+  return d - radius - s.pos_radius.w;
+}
+
+float distance_sphere_cylinder(vec3 center, float radius, GpuCylinder cyl) {
+  vec3 local = to_local(center, cyl.pos, cyl.quat);
+  float r = cyl.radius_height.x;
+  float h = cyl.radius_height.y;
+  float radial = length(local.xy) - r;
+  float vertical = abs(local.z) - h * 0.5;
+  float outside = length(vec2(max(radial, 0.0), max(vertical, 0.0)));
+  float inside = min(max(radial, vertical), 0.0);
+  return outside + inside - radius;
+}
+
+float closest_point_on_segment_distance(vec3 p, vec3 a, vec3 b) {
+  vec3 ab = b - a;
+  float len2 = dot(ab, ab);
+  float t = len2 > 1e-12 ? dot(p - a, ab) / len2 : 0.0;
+  t = clamp(t, 0.0, 1.0);
+  vec3 closest = a + ab * t;
+  return length(p - closest);
+}
+
+float distance_sphere_capsule(vec3 center, float radius, GpuCapsule cap) {
+  vec3 local = to_local(center, cap.pos, cap.quat);
+  float d = closest_point_on_segment_distance(local, cap.base_radius.xyz, cap.tip.xyz);
+  return d - cap.base_radius.w - radius;
+}
+
+float min_world_distance(vec3 center, float radius) {
+  float min_dist = uintBitsToFloat(0x7F800000u);
+  for(uint i = 0; i < pc.num_cuboids; i++) min_dist = min(min_dist, distance_sphere_cuboid(center, radius, cuboids[i]));
+  for(uint i = 0; i < pc.num_sphere_obstacles; i++) min_dist = min(min_dist, distance_sphere_sphere(center, radius, sphere_obstacles[i]));
+  for(uint i = 0; i < pc.num_cylinders; i++) min_dist = min(min_dist, distance_sphere_cylinder(center, radius, cylinders[i]));
+  for(uint i = 0; i < pc.num_capsules; i++) min_dist = min(min_dist, distance_sphere_capsule(center, radius, capsules[i]));
+  return min_dist;
+}
+
+shared float s_q[MAX_DOF];
+shared float s_dists[2 * MAX_DOF + 1];
+shared bool s_solved;
+shared bool s_stuck;
+
+// FKを計算し、ロボット全球のうち障害物への最小符号付き距離を返す(vkmotion::kinematics.cppのFKを移植)。
+float evaluate(float q_local[MAX_DOF]) {
+  vec3 cum_pos[MAX_JOINTS + 1];
+  vec4 cum_quat[MAX_JOINTS + 1];
+  cum_pos[0] = vec3(0.0);
+  cum_quat[0] = vec4(0.0, 0.0, 0.0, 1.0);
+
+  for(uint j = 0; j < pc.num_joints; j++) {
+    GpuJoint gj = joints[j];
+    vec3 motion_pos = vec3(0.0);
+    vec4 motion_quat = vec4(0.0, 0.0, 0.0, 1.0);
+    int qi = gj.meta.y;
+    float value = (qi >= 0) ? q_local[qi] : 0.0;
+    if(gj.meta.x == 0) {
+      vec3 n = normalize(gj.axis.xyz);
+      float half_a = value * 0.5;
+      motion_quat = vec4(n * sin(half_a), cos(half_a));
+    } else if(gj.meta.x == 1) {
+      motion_pos = gj.axis.xyz * value;
+    }
+    vec3 jt_pos = gj.origin_pos.xyz + quat_rotate(gj.origin_quat, motion_pos);
+    vec4 jt_quat = quat_mul(gj.origin_quat, motion_quat);
+    cum_pos[j + 1] = cum_pos[j] + quat_rotate(cum_quat[j], jt_pos);
+    cum_quat[j + 1] = quat_mul(cum_quat[j], jt_quat);
+  }
+
+  float min_dist = uintBitsToFloat(0x7F800000u);
+  for(uint i = 0; i < pc.num_robot_spheres; i++) {
+    GpuRobotSphere s = robot_spheres[i];
+    uint d = uint(s.depth_pad.x);
+    vec3 world_center = cum_pos[d] + quat_rotate(cum_quat[d], s.center_radius.xyz);
+    min_dist = min(min_dist, min_world_distance(world_center, s.center_radius.w));
+  }
+  return min_dist;
+}
+
+void main() {
+  uint wp = gl_WorkGroupID.x;
+  uint tid = gl_LocalInvocationID.x;
+  uint dof = pc.num_dof;
+  uint num_active = 2 * dof + 1;
+
+  if(tid < dof) s_q[tid] = initial_q[wp * dof + tid];
+  if(tid == 0) {
+    s_solved = false;
+    s_stuck = false;
+  }
+  barrier();
+
+  for(uint iter = 0; iter < pc.max_iterations; iter++) {
+    if(tid < num_active) {
+      float q_local[MAX_DOF];
+      for(uint j = 0; j < dof; j++) q_local[j] = s_q[j];
+      if(tid < 2 * dof) {
+        uint dim = tid / 2;
+        float sign = (tid % 2 == 0) ? 1.0 : -1.0;
+        q_local[dim] += sign * pc.repair_delta;
+      }
+      s_dists[tid] = evaluate(q_local);
+    }
+    barrier();
+
+    if(tid == 0) {
+      float center_dist = s_dists[2 * dof];
+      if(center_dist > 0.0) {
+        s_solved = true;
+      } else {
+        float grad[MAX_DOF];
+        float norm = 0.0;
+        for(uint j = 0; j < dof; j++) {
+          grad[j] = (s_dists[2 * j] - s_dists[2 * j + 1]) / (2.0 * pc.repair_delta);
+          norm += grad[j] * grad[j];
+        }
+        norm = sqrt(norm);
+        if(norm < 1e-8) {
+          s_stuck = true;
+        } else {
+          for(uint j = 0; j < dof; j++) {
+            float v = s_q[j] + pc.repair_step * grad[j] / norm;
+            s_q[j] = clamp(v, dof_limits[j].x, dof_limits[j].y);
+          }
+        }
+      }
+    }
+    barrier();
+    if(s_solved || s_stuck) break;
+  }
+
+  if(tid < dof) out_q[wp * dof + tid] = s_q[tid];
+  if(tid == 0) out_success[wp] = s_solved ? 1u : 0u;
+}

@@ -88,81 +88,6 @@ std::vector<JointState> via_point_trajectory(const JointState& start, const Join
   return traj;
 }
 
-// 衝突している全waypointを同時並行でrepair。1反復=2 dispatchを衝突waypoint数に関わらず固定で払うことで、waypointごとに個別dispatch列を回すより総dispatch数を減らせる。戻り値はqsと同順の成否。
-std::vector<bool> repair_waypoints_batch(const RobotWorld& rw, const RobotConfig& robot, std::vector<std::vector<float>*>& qs) {
-  std::vector<bool> solved(qs.size(), false);
-  if(qs.empty()) return solved;
-
-  const auto& lower = robot.joint_position_limits_lower();
-  const auto& upper = robot.joint_position_limits_upper();
-  const size_t dof  = qs[0]->size();
-
-  std::vector<size_t> pending;
-  for(size_t i = 0; i < qs.size(); i++) pending.push_back(i);
-
-  {
-    std::vector<JointState> states;
-    for(size_t idx : pending) states.push_back(JointState{*qs[idx], {}});
-    std::vector<float> dists = rw.get_min_world_collision_distance_batch(states);
-    std::vector<size_t> next;
-    for(size_t k = 0; k < pending.size(); k++) {
-      if(dists[k] > 0.0f) solved[pending[k]] = true;
-      else next.push_back(pending[k]);
-    }
-    pending = std::move(next);
-  }
-
-  for(int iter = 0; iter < kRepairMaxIterations && !pending.empty(); iter++) {
-    std::vector<JointState> perturbed;
-    perturbed.reserve(pending.size() * dof * 2);
-    for(size_t idx : pending) {
-      const auto& q = *qs[idx];
-      for(size_t j = 0; j < dof; j++) {
-        std::vector<float> qp = q, qm = q;
-        qp[j] += kRepairDelta;
-        qm[j] -= kRepairDelta;
-        perturbed.push_back(JointState{std::move(qp), {}});
-        perturbed.push_back(JointState{std::move(qm), {}});
-      }
-    }
-    std::vector<float> dists = rw.get_min_world_collision_distance_batch(perturbed);
-
-    std::vector<size_t> still_moving;
-    size_t offset = 0;
-    for(size_t idx : pending) {
-      auto& q = *qs[idx];
-      std::vector<float> grad(dof, 0.0f);
-      float norm = 0.0f;
-      for(size_t j = 0; j < dof; j++) {
-        grad[j] = (dists[offset + 2 * j] - dists[offset + 2 * j + 1]) / (2.0f * kRepairDelta);
-        norm += grad[j] * grad[j];
-      }
-      offset += dof * 2;
-      norm = std::sqrt(norm);
-      if(norm < 1e-8f) continue;  // 勾配消失、この反復では動かせない
-      for(size_t j = 0; j < dof; j++) {
-        q[j] += kRepairStep * grad[j] / norm;
-        q[j] = std::max(lower[j], std::min(upper[j], q[j]));
-      }
-      still_moving.push_back(idx);
-    }
-
-    if(!still_moving.empty()) {
-      std::vector<JointState> recheck;
-      for(size_t idx : still_moving) recheck.push_back(JointState{*qs[idx], {}});
-      std::vector<float> redist = rw.get_min_world_collision_distance_batch(recheck);
-      pending.clear();
-      for(size_t k = 0; k < still_moving.size(); k++) {
-        if(redist[k] > 0.0f) solved[still_moving[k]] = true;
-        else pending.push_back(still_moving[k]);
-      }
-    } else {
-      pending.clear();
-    }
-  }
-  return solved;
-}
-
 // ランダムな2点[i,j]を直線で結び直し、衝突フリーかつ短くなるなら置き換える標準的なshortcut smoothing。
 void shortcut_smooth(const RobotWorld& rw, std::vector<JointState>& traj, int iterations) {
   if(traj.size() < 4) return;
@@ -291,7 +216,7 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
     std::vector<std::vector<float>*> failing;
     for(size_t i = 1; i + 1 < traj.size(); i++)
       if(!free[best * interior_count + (i - 1)]) failing.push_back(&traj[i].position);
-    std::vector<bool> repaired = repair_waypoints_batch(rw, robot, failing);
+    std::vector<bool> repaired = rw.repair_waypoints(failing, kRepairStep, kRepairDelta, kRepairMaxIterations);
     bool all_ok                = std::all_of(repaired.begin(), repaired.end(), [](bool b) { return b; });
 
     if(all_ok) {

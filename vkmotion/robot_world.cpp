@@ -1,11 +1,13 @@
 #include "robot_world.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "sphere_collision.hpp"
 #include "vk_collision.hpp"
 #include "vk_context.hpp"
+#include "vk_repair.hpp"
 
 namespace vkmotion {
 
@@ -28,6 +30,12 @@ VkCollisionPipeline& RobotWorld::vulkan_pipeline() const {
   if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
   if(!vk_collision_) vk_collision_ = std::make_unique<VkCollisionPipeline>(*vk_ctx_);
   return *vk_collision_;
+}
+
+VkRepairPipeline& RobotWorld::vulkan_repair_pipeline() const {
+  if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
+  if(!vk_repair_) vk_repair_ = std::make_unique<VkRepairPipeline>(*vk_ctx_, *config_.robot_config);
+  return *vk_repair_;
 }
 
 std::vector<float> RobotWorld::get_collision_distance(const JointState& joint_state) const {
@@ -98,6 +106,82 @@ std::vector<float> RobotWorld::get_min_world_collision_distance_batch(const std:
     offset += spheres_per_state[i];
   }
   return result;
+}
+
+std::vector<bool> RobotWorld::repair_waypoints(std::vector<std::vector<float>*>& qs, float repair_step, float repair_delta, int max_iterations) const {
+  if(qs.empty()) return {};
+
+  if(config_.use_vulkan) return vulkan_repair_pipeline().repair(qs, *config_.world_config, repair_step, repair_delta, static_cast<uint32_t>(max_iterations));
+
+  std::vector<bool> solved(qs.size(), false);
+  const auto& lower = config_.robot_config->joint_position_limits_lower();
+  const auto& upper = config_.robot_config->joint_position_limits_upper();
+  const size_t dof   = qs[0]->size();
+
+  std::vector<size_t> pending;
+  for(size_t i = 0; i < qs.size(); i++) pending.push_back(i);
+
+  {
+    std::vector<JointState> states;
+    for(size_t idx : pending) states.push_back(JointState{*qs[idx], {}});
+    std::vector<float> dists = get_min_world_collision_distance_batch(states);
+    std::vector<size_t> next;
+    for(size_t k = 0; k < pending.size(); k++) {
+      if(dists[k] > 0.0f) solved[pending[k]] = true;
+      else next.push_back(pending[k]);
+    }
+    pending = std::move(next);
+  }
+
+  for(int iter = 0; iter < max_iterations && !pending.empty(); iter++) {
+    std::vector<JointState> perturbed;
+    perturbed.reserve(pending.size() * dof * 2);
+    for(size_t idx : pending) {
+      const auto& q = *qs[idx];
+      for(size_t j = 0; j < dof; j++) {
+        std::vector<float> qp = q, qm = q;
+        qp[j] += repair_delta;
+        qm[j] -= repair_delta;
+        perturbed.push_back(JointState{std::move(qp), {}});
+        perturbed.push_back(JointState{std::move(qm), {}});
+      }
+    }
+    std::vector<float> dists = get_min_world_collision_distance_batch(perturbed);
+
+    std::vector<size_t> still_moving;
+    size_t offset = 0;
+    for(size_t idx : pending) {
+      auto& q = *qs[idx];
+      std::vector<float> grad(dof, 0.0f);
+      float norm = 0.0f;
+      for(size_t j = 0; j < dof; j++) {
+        grad[j] = (dists[offset + 2 * j] - dists[offset + 2 * j + 1]) / (2.0f * repair_delta);
+        norm += grad[j] * grad[j];
+      }
+      offset += dof * 2;
+      norm = std::sqrt(norm);
+      if(norm < 1e-8f) continue;  // 勾配消失、この反復では動かせない
+      for(size_t j = 0; j < dof; j++) {
+        q[j] += repair_step * grad[j] / norm;
+        q[j] = std::max(lower[j], std::min(upper[j], q[j]));
+      }
+      still_moving.push_back(idx);
+    }
+
+    if(!still_moving.empty()) {
+      std::vector<JointState> recheck;
+      for(size_t idx : still_moving) recheck.push_back(JointState{*qs[idx], {}});
+      std::vector<float> redist = get_min_world_collision_distance_batch(recheck);
+      pending.clear();
+      for(size_t k = 0; k < still_moving.size(); k++) {
+        if(redist[k] > 0.0f) solved[still_moving[k]] = true;
+        else pending.push_back(still_moving[k]);
+      }
+    } else {
+      pending.clear();
+    }
+  }
+  return solved;
 }
 
 std::vector<bool> RobotWorld::is_collision_free_batch(const std::vector<JointState>& joint_states) const {
