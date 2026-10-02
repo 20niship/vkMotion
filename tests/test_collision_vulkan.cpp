@@ -52,6 +52,41 @@ TEST_CASE("RobotWorld Vulkan: matches CPU when an obstacle overlaps the workspac
   CHECK(gpu.is_collision_free(js) == cpu.is_collision_free(js));
 }
 
+TEST_CASE("RobotWorld Vulkan: matches CPU for plane/convex/sdf obstacles") {
+  auto robot = load_two_link_arm();
+  auto world = cutil::make_ref<WorldConfig>();
+
+  // link2's sphere sits at (0.3, 0, 0.3) at the all-zero joint state (see test_fk.cpp).
+  Plane floor;
+  floor.name           = "floor";
+  floor.pose.position = cutil::Vec3f(0.0f, 0.0f, -0.5f);  // normal = +Z, far below the arm
+  world->add_obstacle(floor);
+
+  ConvexMesh hull;
+  hull.name          = "hull";
+  hull.pose.position = cutil::Vec3f(0.3f, 0.0f, 0.3f);
+  for(float sx : {-1.0f, 1.0f})
+    for(float sy : {-1.0f, 1.0f})
+      for(float sz : {-1.0f, 1.0f}) hull.vertices.push_back(cutil::Vec3f(sx * 0.1f, sy * 0.1f, sz * 0.1f));
+  world->add_obstacle(hull);
+
+  SDFGrid grid;
+  grid.name            = "grid";
+  grid.pose.position = cutil::Vec3f(-5.0f, -5.0f, -5.0f);  // far from the arm, all distances large (no collision)
+  grid.dims            = cutil::Vec3f(2.0f, 2.0f, 2.0f);
+  grid.resolution[0] = grid.resolution[1] = grid.resolution[2] = 2;
+  grid.distances                                                   = {5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f};
+  world->add_obstacle(grid);
+
+  RobotWorld cpu(RobotWorldConfig{robot, world, false});
+  RobotWorld gpu(RobotWorldConfig{robot, world, true});
+
+  JointState js{{0.0f, 0.0f}, {}};
+  check_distances_match(gpu.get_collision_distance(js), cpu.get_collision_distance(js));
+  CHECK_FALSE(gpu.is_collision_free(js));  // the convex hull around link2's sphere collides
+  CHECK(gpu.is_collision_free(js) == cpu.is_collision_free(js));
+}
+
 TEST_CASE("RobotWorld Vulkan: batch dispatch matches per-state CPU results") {
   auto robot = load_two_link_arm();
   auto world = cutil::make_ref<WorldConfig>();

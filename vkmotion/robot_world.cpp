@@ -52,6 +52,9 @@ std::vector<float> RobotWorld::get_collision_distance(const JointState& joint_st
     for(const auto& o : world.sphere()) min_dist = std::min(min_dist, distance_sphere_sphere(s.center, s.radius, o));
     for(const auto& o : world.cylinder()) min_dist = std::min(min_dist, distance_sphere_cylinder(s.center, s.radius, o));
     for(const auto& o : world.capsule()) min_dist = std::min(min_dist, distance_sphere_capsule(s.center, s.radius, o));
+    for(const auto& o : world.plane()) min_dist = std::min(min_dist, distance_sphere_plane(s.center, s.radius, o));
+    for(const auto& o : world.convex_mesh()) min_dist = std::min(min_dist, distance_sphere_convex(s.center, s.radius, o));
+    for(const auto& o : world.sdf_grid()) min_dist = std::min(min_dist, distance_sphere_sdf(s.center, s.radius, o));
     distances.push_back(min_dist);
   }
   return distances;

@@ -76,6 +76,30 @@ TEST_CASE("RobotWorld: GPU repair_waypoints (GPU常駐FK+勾配降下) matches C
   CHECK(cpu.is_collision_free(JointState{q_gpu, {}}));
 }
 
+TEST_CASE("RobotWorld: GPU repair_waypoints converges around a ConvexMesh obstacle") {
+  auto robot = load_two_link_arm();
+  auto world = cutil::make_ref<WorldConfig>();
+
+  ConvexMesh blocker;
+  blocker.name          = "blocker";
+  blocker.pose.position = cutil::Vec3f(0.3f * std::cos(0.5f), 0.3f * std::sin(0.5f), 0.3f);
+  for(float sx : {-1.0f, 1.0f})
+    for(float sy : {-1.0f, 1.0f})
+      for(float sz : {-1.0f, 1.0f}) blocker.vertices.push_back(cutil::Vec3f(sx * 0.03f, sy * 0.03f, sz * 0.03f));
+  world->add_obstacle(blocker);
+
+  RobotWorld cpu(RobotWorldConfig{robot, world, false});
+  RobotWorld gpu(RobotWorldConfig{robot, world, true});
+
+  std::vector<float> q_gpu = {0.52f, 0.0f};  // off the zero-gradient saddle at 0.5, see test above
+  std::vector<std::vector<float>*> qs_gpu = {&q_gpu};
+  std::vector<bool> gpu_ok = gpu.repair_waypoints(qs_gpu, 0.05f, 1e-2f, 80);
+
+  REQUIRE(gpu_ok.size() == 1);
+  CHECK(gpu_ok[0]);
+  CHECK(cpu.is_collision_free(JointState{q_gpu, {}}));
+}
+
 TEST_CASE("RobotWorld: GPU repair_waypoints handles multiple waypoints in one dispatch") {
   auto robot = load_two_link_arm();
   auto world = cutil::make_ref<WorldConfig>();
