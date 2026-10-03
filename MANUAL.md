@@ -268,6 +268,39 @@ class MotionGen {
 3. 衝突なし・関節limit内で最初に収束した軌道を採用、`MotionGenResult`に詰めて返す
 4. 全シード失敗なら `enable_graph_planner` が真なら幾何プランナーにフォールバック(未実装の間は `success=false`)
 
+## 5.5 `CartesianPathPlanner` — 直線Cartesianパス(MoveIt2: computeCartesianPath)
+
+`vkmotion/cartesian_path.hpp`
+
+エンドエフェクタをCartesian空間(位置+姿勢)で直線的に動かしたい場合に使う。`MotionGen`は関節空間で直線補間するため、生成される経路はCartesian空間では一般に曲線になる。これに対し`CartesianPathPlanner`は目標Poseの列を位置lerp+姿勢slerpで細かく分割し、各点をIKチェイニング(直前の解を次のシードにする)で解くことで、エンドエフェクタの軌跡そのものを直線に保つ。
+
+```cpp
+struct CartesianWaypoint { Pose pose; };
+
+struct CartesianPathConfig {
+  float max_step         = 0.01f;  // 隣接補間点間の最大直線距離[m]
+  float max_angular_step = 0.05f;  // 隣接補間点間の最大回転角[rad]
+  float min_fraction      = 1.0f;  // この到達率未満なら失敗扱い
+};
+
+struct CartesianPathResult {
+  bool success;
+  float fraction_achieved;  // MoveIt2のcomputeCartesianPathと同様、0.0〜1.0の到達率
+  std::vector<JointState> trajectory;
+  std::string status;
+};
+
+class CartesianPathPlanner {
+ public:
+  explicit CartesianPathPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan = true);
+  CartesianPathResult compute_cartesian_path(const JointState& start_state, const std::vector<CartesianWaypoint>& waypoints,
+                                              const CartesianPathConfig& config = {});
+};
+```
+
+- IKで解けない、または衝突する中間点に到達した時点で経路を打ち切り、そこまでの到達率を`fraction_achieved`に入れる(`min_fraction`以上なら成功扱い)
+- IKチェイニング自体は逐次処理だが、各ステップのIK自体は既存の`IKSolver`(複数シード並列)をそのまま使う
+
 ## 6. 実装フェーズとの対応
 
 | マニュアル節 | PLAN.mdのフェーズ |
