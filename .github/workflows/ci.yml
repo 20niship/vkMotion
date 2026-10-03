@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      VULKAN_SDK_VERSION: 1.3.283.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan SDK + lavapipe (software Vulkan ICD)
+        run: |
+          sudo apt-get update
+          # lavapipe (llvmpipe-backed software Vulkan ICD) + glslc + validation layers
+          sudo apt-get install -y \
+            mesa-vulkan-drivers \
+            vulkan-tools \
+            libvulkan-dev \
+            vulkan-validationlayers \
+            glslc \
+            spirv-tools
+
+      - name: Report Vulkan devices (software fallback expected on CI runners)
+        run: vulkaninfo --summary || true
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DVKMOTION_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure

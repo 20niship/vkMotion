@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<!--
+  Universal Robots UR5e (6-DoF) joint kinematics, simplified for vkMotion collision testing:
+    - visual mesh geometry omitted
+    - collision geometry approximated with cylinder/sphere primitives (not exact CAD)
+  Joint origins sourced verbatim from the official nominal kinematics calibration, axes/limits
+  from the standard ur_macro.xacro convention (every joint rotates about its own local Z):
+    https://github.com/UniversalRobots/Universal_Robots_ROS2_Description
+    config/ur5e/default_kinematics.yaml, config/ur5e/joint_limits.yaml
+-->
+<robot name="ur5e">
+  <link name="base_link">
+    <collision>
+      <geometry><cylinder radius="0.06" length="0.08"/></geometry>
+    </collision>
+  </link>
+  <link name="shoulder_link">
+    <collision>
+      <geometry><cylinder radius="0.06" length="0.12"/></geometry>
+    </collision>
+  </link>
+  <link name="upper_arm_link">
+    <collision>
+      <origin xyz="-0.2125 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.045" length="0.425"/></geometry>
+    </collision>
+  </link>
+  <link name="forearm_link">
+    <collision>
+      <origin xyz="-0.1961 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.035" length="0.3922"/></geometry>
+    </collision>
+  </link>
+  <link name="wrist_1_link">
+    <collision>
+      <geometry><cylinder radius="0.035" length="0.08"/></geometry>
+    </collision>
+  </link>
+  <link name="wrist_2_link">
+    <collision>
+      <geometry><cylinder radius="0.035" length="0.08"/></geometry>
+    </collision>
+  </link>
+  <link name="wrist_3_link">
+    <collision>
+      <geometry><sphere radius="0.035"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="shoulder_pan_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 0.1625" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185" upper="6.283185" effort="150" velocity="3.1416"/>
+  </joint>
+  <joint name="shoulder_lift_joint" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0" rpy="1.570796327 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185" upper="6.283185" effort="150" velocity="3.1416"/>
+  </joint>
+  <joint name="elbow_joint" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="-0.425 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.141593" upper="3.141593" effort="150" velocity="3.1416"/>
+  </joint>
+  <joint name="wrist_1_joint" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_1_link"/>
+    <origin xyz="-0.3922 0 0.1333" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185" upper="6.283185" effort="28" velocity="3.1416"/>
+  </joint>
+  <joint name="wrist_2_joint" type="revolute">
+    <parent link="wrist_1_link"/>
+    <child link="wrist_2_link"/>
+    <origin xyz="0 -0.0997 0" rpy="1.570796327 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185" upper="6.283185" effort="28" velocity="3.1416"/>
+  </joint>
+  <joint name="wrist_3_joint" type="revolute">
+    <parent link="wrist_2_link"/>
+    <child link="wrist_3_link"/>
+    <origin xyz="0 0.0996 0" rpy="1.570796327 0 3.141592654"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185" upper="6.283185" effort="28" velocity="3.1416"/>
+  </joint>
+</robot>

@@ -1,0 +1,9 @@
+build/
+build-*/
+compile_commands.json
+*.spv
+examples/**/*.json
+examples/**/*.gif
+examples/**/*.mp4
+examples/__pycache__/
+__pycache__/

@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+<!--
+  OpenArm (enactic/openarm_description, v1.0, right arm, 7-DoF) joint kinematics,
+  simplified for vkMotion collision testing:
+    - visual geometry omitted
+    - collision geometry approximated with box/cylinder/sphere primitives (not exact CAD)
+    - bimanual torso mounting offset dropped (standalone single-arm joint limits used)
+  Joint origins/axes/limits sourced from:
+    https://github.com/enactic/openarm_description
+    assets/robot/openarm_v1.0/config/arm/kinematics.yaml
+    assets/robot/openarm_v1.0/config/arm/joint_limits.yaml
+    assets/robot/openarm_v1.0/urdf/arm/openarm_arm.xacro (reflect=1, right arm)
+-->
+<robot name="openarm">
+  <link name="base_link">
+    <collision>
+      <geometry><cylinder radius="0.045" length="0.09"/></geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <collision>
+      <geometry><cylinder radius="0.025" length="0.05"/></geometry>
+    </collision>
+  </link>
+  <link name="link2">
+    <collision>
+      <geometry><box size="0.045 0.04 0.05"/></geometry>
+    </collision>
+  </link>
+  <link name="link3">
+    <collision>
+      <geometry><cylinder radius="0.022" length="0.05"/></geometry>
+    </collision>
+  </link>
+  <link name="link4">
+    <collision>
+      <geometry><box size="0.06 0.055 0.09"/></geometry>
+    </collision>
+  </link>
+  <link name="link5">
+    <collision>
+      <geometry><cylinder radius="0.03" length="0.08"/></geometry>
+    </collision>
+  </link>
+  <link name="link6">
+    <collision>
+      <geometry><box size="0.018 0.018 0.02"/></geometry>
+    </collision>
+  </link>
+  <link name="link7">
+    <collision>
+      <geometry><box size="0.03 0.03 0.035"/></geometry>
+    </collision>
+  </link>
+  <link name="link_tip">
+    <collision>
+      <geometry><sphere radius="0.022"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.0625" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.396263" upper="3.490659" effort="40" velocity="16.754666"/>
+  </joint>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="-0.0301 0.0 0.06" rpy="0 0 0"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="-1.745329" upper="1.745329" effort="40" velocity="16.754666"/>
+  </joint>
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0.0301 0.0 0.06625" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.570796" upper="1.570796" effort="27" velocity="5.445426"/>
+  </joint>
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0.0 0.0315 0.15375" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="2.443461" effort="27" velocity="5.445426"/>
+  </joint>
+  <joint name="joint5" type="revolute">
+    <parent link="link4"/>
+    <child link="link5"/>
+    <origin xyz="0.0 -0.0315 0.0955" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.570796" upper="1.570796" effort="7" velocity="20.943946"/>
+  </joint>
+  <joint name="joint6" type="revolute">
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="0.0375 0.0 0.1205" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.785398" upper="0.785398" effort="7" velocity="20.943946"/>
+  </joint>
+  <joint name="joint7" type="revolute">
+    <parent link="link6"/>
+    <child link="link7"/>
+    <origin xyz="-0.0375 0.0 0.0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.570796" upper="1.570796" effort="7" velocity="20.943946"/>
+  </joint>
+  <joint name="joint_tip" type="fixed">
+    <parent link="link7"/>
+    <child link="link_tip"/>
+    <origin xyz="0.000001 0.0205 0.0" rpy="0 0 0"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+</robot>
