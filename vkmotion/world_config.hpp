@@ -20,6 +20,7 @@ class WorldConfig {
   void add_obstacle(const Plane& obstacle) { plane_.push_back(obstacle); }
   void add_obstacle(const ConvexMesh& obstacle) { convex_mesh_.push_back(obstacle); }
   void add_obstacle(const SDFGrid& obstacle) { sdf_grid_.push_back(obstacle); }
+  void add_attached_object(const AttachedObject& obstacle) { attached_.push_back(obstacle); }
   void clear() {
     cuboid_.clear();
     sphere_.clear();
@@ -28,6 +29,7 @@ class WorldConfig {
     plane_.clear();
     convex_mesh_.clear();
     sdf_grid_.clear();
+    attached_.clear();
   }
 
   const std::vector<Cuboid>& cuboid() const { return cuboid_; }
@@ -37,6 +39,7 @@ class WorldConfig {
   const std::vector<Plane>& plane() const { return plane_; }
   const std::vector<ConvexMesh>& convex_mesh() const { return convex_mesh_; }
   const std::vector<SDFGrid>& sdf_grid() const { return sdf_grid_; }
+  const std::vector<AttachedObject>& attached_objects() const { return attached_; }
 
  private:
   std::vector<Cuboid> cuboid_;
@@ -46,6 +49,7 @@ class WorldConfig {
   std::vector<Plane> plane_;
   std::vector<ConvexMesh> convex_mesh_;
   std::vector<SDFGrid> sdf_grid_;
+  std::vector<AttachedObject> attached_;
 };
 
 }  // namespace vkmotion

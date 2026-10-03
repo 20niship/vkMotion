@@ -2,9 +2,11 @@
 
 #include <cutil/ref.hpp>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "constraints.hpp"
 #include "robot_config.hpp"
 #include "robot_world.hpp"
 #include "types.hpp"
@@ -17,13 +19,14 @@ struct MotionGenConfig {
   cutil::Ref<WorldConfig> world_config;  // nullptr: collision ignored
   int num_trajopt_seeds = 12;
   bool use_vulkan = true;  // 軌道修正時の衝突判定(RobotWorld)に適用。IKSolver内部の衝突判定は現状CPU固定
+  std::optional<ConstraintSet> constraints;  // nullopt: 制約無視(既定、既存の挙動と完全に同じ)
 
   static MotionGenConfig load_from_robot_config(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config);
 };
 
 struct MotionGenPlanConfig {
   int max_attempts         = 10;
-  bool enable_graph_planner = true;  // TODO: 幾何プランナー未実装のため現状無視される
+  bool enable_graph_planner = true;  // trueなら直線補間+局所repairが全滅した後にRRT-Connectフォールバックを試す
   float timeout_seconds    = 5.0f;
 };
 

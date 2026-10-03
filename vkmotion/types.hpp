@@ -70,4 +70,12 @@ struct SDFGrid : Obstacle {
   std::vector<float> distances;
 };
 
+// Sphere rigidly carried by a robot link (MoveIt2: attached collision object). Modeled as an extra link_name-tagged CollisionSphere, not a full Obstacle shape, so it reuses the sphere-vs-primitive pipeline and same-link/adjacent exclusion as-is; approximate a non-spherical held object with several of these. center is link-local.
+struct AttachedObject {
+  std::string name;
+  std::string link_name;
+  cutil::Vec3f center{};
+  float radius = 0.0f;
+};
+
 }  // namespace vkmotion

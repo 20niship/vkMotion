@@ -11,6 +11,33 @@
 
 namespace vkmotion {
 
+namespace {
+
+cutil::Vec3f transform_point(const cutil::Mat4f& t, const cutil::Vec3f& p) {
+  return cutil::Vec3f(t(0, 0) * p[0] + t(0, 1) * p[1] + t(0, 2) * p[2] + t(0, 3), t(1, 0) * p[0] + t(1, 1) * p[1] + t(1, 2) * p[2] + t(1, 3),
+                       t(2, 0) * p[0] + t(2, 1) * p[1] + t(2, 2) * p[2] + t(2, 3));
+}
+
+cutil::Mat4f link_world_matrix(const RobotConfig& robot, const JointState& js, const std::string& link_name) {
+  std::vector<cutil::Mat4f> link_world = robot.forward_kinematics(js);
+  const auto& names                     = robot.link_names();
+  for(size_t i = 0; i < names.size(); i++)
+    if(names[i] == link_name) return link_world[i];
+  return cutil::Mat4f::identity();
+}
+
+// link_name付きの普通のCollisionSphereとして追加するだけで既存のsphere-vs-obstacle/self-collision除外ロジックに乗る(CPU・GPU(get_collision_distance系)ともシェーダ変更不要)。GPU常駐repairはロボット構造を構築時に1回だけアップロードする設計のため非対応。
+std::vector<CollisionSphere> spheres_with_attached(const RobotConfig& robot, const WorldConfig& world, const JointState& js) {
+  std::vector<CollisionSphere> spheres = robot.collision_spheres_world(js);
+  for(const auto& att : world.attached_objects()) {
+    cutil::Mat4f t = link_world_matrix(robot, js, att.link_name);
+    spheres.push_back(CollisionSphere{att.link_name, transform_point(t, att.center), att.radius});
+  }
+  return spheres;
+}
+
+}  // namespace
+
 RobotWorld::RobotWorld(const RobotWorldConfig& config) : config_(config) {
   for(const auto& joint : config_.robot_config->urdf_model().joints) {
     adjacent_links_.emplace_back(joint.parent_link, joint.child_link);
@@ -39,7 +66,7 @@ VkRepairPipeline& RobotWorld::vulkan_repair_pipeline() const {
 }
 
 std::vector<float> RobotWorld::get_collision_distance(const JointState& joint_state) const {
-  std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_state);
+  std::vector<CollisionSphere> spheres = spheres_with_attached(*config_.robot_config, *config_.world_config, joint_state);
   const WorldConfig& world             = *config_.world_config;
 
   if(config_.use_vulkan) return vulkan_pipeline().compute(spheres, world);
@@ -48,20 +75,41 @@ std::vector<float> RobotWorld::get_collision_distance(const JointState& joint_st
   distances.reserve(spheres.size());
   for(const auto& s : spheres) {
     float min_dist = std::numeric_limits<float>::infinity();
-    for(const auto& o : world.cuboid()) min_dist = std::min(min_dist, distance_sphere_cuboid(s.center, s.radius, o));
-    for(const auto& o : world.sphere()) min_dist = std::min(min_dist, distance_sphere_sphere(s.center, s.radius, o));
-    for(const auto& o : world.cylinder()) min_dist = std::min(min_dist, distance_sphere_cylinder(s.center, s.radius, o));
-    for(const auto& o : world.capsule()) min_dist = std::min(min_dist, distance_sphere_capsule(s.center, s.radius, o));
-    for(const auto& o : world.plane()) min_dist = std::min(min_dist, distance_sphere_plane(s.center, s.radius, o));
-    for(const auto& o : world.convex_mesh()) min_dist = std::min(min_dist, distance_sphere_convex(s.center, s.radius, o));
-    for(const auto& o : world.sdf_grid()) min_dist = std::min(min_dist, distance_sphere_sdf(s.center, s.radius, o));
+    for(const auto& o : world.cuboid()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_cuboid(s.center, s.radius, o));
+    }
+    for(const auto& o : world.sphere()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_sphere(s.center, s.radius, o));
+    }
+    for(const auto& o : world.cylinder()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_cylinder(s.center, s.radius, o));
+    }
+    for(const auto& o : world.capsule()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_capsule(s.center, s.radius, o));
+    }
+    for(const auto& o : world.plane()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_plane(s.center, s.radius, o));
+    }
+    for(const auto& o : world.convex_mesh()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_convex(s.center, s.radius, o));
+    }
+    for(const auto& o : world.sdf_grid()) {
+      if(config_.acm.is_allowed(s.link_name, o.name)) continue;
+      min_dist = std::min(min_dist, distance_sphere_sdf(s.center, s.radius, o));
+    }
     distances.push_back(min_dist);
   }
   return distances;
 }
 
 std::vector<float> RobotWorld::get_self_collision_distance(const JointState& joint_state) const {
-  std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_state);
+  std::vector<CollisionSphere> spheres = spheres_with_attached(*config_.robot_config, *config_.world_config, joint_state);
 
   std::vector<float> distances;
   for(size_t i = 0; i < spheres.size(); i++) {
@@ -70,6 +118,7 @@ std::vector<float> RobotWorld::get_self_collision_distance(const JointState& joi
       const auto& b = spheres[j];
       if(a.link_name == b.link_name) continue;
       if(is_adjacent(a.link_name, b.link_name)) continue;
+      if(config_.acm.is_allowed(a.link_name, b.link_name)) continue;
       float d = static_cast<float>((a.center - b.center).length()) - a.radius - b.radius;
       distances.push_back(d);
     }
@@ -97,7 +146,7 @@ std::vector<float> RobotWorld::get_min_world_collision_distance_batch(const std:
   std::vector<CollisionSphere> all_spheres;
   std::vector<size_t> spheres_per_state(joint_states.size());
   for(size_t i = 0; i < joint_states.size(); i++) {
-    std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_states[i]);
+    std::vector<CollisionSphere> spheres = spheres_with_attached(*config_.robot_config, *config_.world_config, joint_states[i]);
     spheres_per_state[i]                 = spheres.size();
     all_spheres.insert(all_spheres.end(), spheres.begin(), spheres.end());
   }
@@ -114,6 +163,7 @@ std::vector<float> RobotWorld::get_min_world_collision_distance_batch(const std:
 std::vector<bool> RobotWorld::repair_waypoints(std::vector<std::vector<float>*>& qs, float repair_step, float repair_delta, int max_iterations) const {
   if(qs.empty()) return {};
 
+  // GPU常駐repairはロボット構造を構築時に1回だけアップロードするため、ここではattached objectは未対応(WorldConfigの障害物のみ)。
   if(config_.use_vulkan) return vulkan_repair_pipeline().repair(qs, *config_.world_config, repair_step, repair_delta, static_cast<uint32_t>(max_iterations));
 
   std::vector<bool> solved(qs.size(), false);
@@ -198,7 +248,7 @@ std::vector<bool> RobotWorld::is_collision_free_batch(const std::vector<JointSta
   std::vector<CollisionSphere> all_spheres;
   std::vector<size_t> spheres_per_state(joint_states.size());
   for(size_t i = 0; i < joint_states.size(); i++) {
-    std::vector<CollisionSphere> spheres = config_.robot_config->collision_spheres_world(joint_states[i]);
+    std::vector<CollisionSphere> spheres = spheres_with_attached(*config_.robot_config, *config_.world_config, joint_states[i]);
     spheres_per_state[i]                 = spheres.size();
     all_spheres.insert(all_spheres.end(), spheres.begin(), spheres.end());
   }

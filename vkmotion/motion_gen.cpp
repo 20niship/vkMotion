@@ -6,6 +6,7 @@
 
 #include "ik_solver.hpp"
 #include "robot_world.hpp"
+#include "rrt_connect.hpp"
 
 namespace vkmotion {
 
@@ -147,6 +148,54 @@ void shortcut_smooth(const RobotWorld& rw, std::vector<JointState>& traj, int ro
   }
 }
 
+// Constraint違反を数値勾配降下で下げる。ponytail: 制約チェック自体が軽量なCPU計算なのでGPU化しない。
+bool repair_constraint_violation(const ConstraintSet& constraints, const RobotConfig& robot, std::vector<float>& q, int max_iterations) {
+  constexpr float kDelta = 1e-2f;
+  constexpr float kStep  = 0.05f;
+  const auto& lower = robot.joint_position_limits_lower();
+  const auto& upper = robot.joint_position_limits_upper();
+  const size_t dof  = q.size();
+
+  if(constraints.total_violation(JointState{q, {}}, robot) <= 0.0f) return true;
+  for(int iter = 0; iter < max_iterations; iter++) {
+    std::vector<float> grad(dof, 0.0f);
+    float norm = 0.0f;
+    for(size_t j = 0; j < dof; j++) {
+      std::vector<float> qp = q, qm = q;
+      qp[j] += kDelta;
+      qm[j] -= kDelta;
+      float vp = constraints.total_violation(JointState{qp, {}}, robot);
+      float vm = constraints.total_violation(JointState{qm, {}}, robot);
+      grad[j]  = (vp - vm) / (2.0f * kDelta);
+      norm += grad[j] * grad[j];
+    }
+    norm = std::sqrt(norm);
+    if(norm < 1e-8f) break;
+    for(size_t j = 0; j < dof; j++) {
+      q[j] -= kStep * grad[j] / norm;  // 違反量を下る方向
+      q[j] = std::max(lower[j], std::min(upper[j], q[j]));
+    }
+    if(constraints.total_violation(JointState{q, {}}, robot) <= 0.0f) return true;
+  }
+  return false;
+}
+
+// shortcut平滑化+制約repair+制約repair後の再衝突チェックをまとめる(直線補間経路・RRT-Connect経路どちらの後処理にも使う)。
+bool finalize_trajectory(const RobotWorld& rw, const RobotConfig& robot, std::vector<JointState>& traj, const std::optional<ConstraintSet>& constraints) {
+  shortcut_smooth(rw, traj, kShortcutIterations);
+  if(!constraints.has_value() || constraints->empty()) return true;
+
+  bool ok = true;
+  for(size_t i = 1; i + 1 < traj.size() && ok; i++) {
+    if(!constraints->is_satisfied(traj[i], robot)) ok = repair_constraint_violation(*constraints, robot, traj[i].position, kRepairMaxIterations);
+  }
+  if(!ok) return false;
+
+  std::vector<JointState> interior(traj.begin() + 1, traj.end() - 1);
+  std::vector<bool> still_free = rw.is_collision_free_batch(interior);
+  return std::all_of(still_free.begin(), still_free.end(), [](bool b) { return b; });
+}
+
 // 各関節の速度制限のみを守る素朴な時間パラメタライズ(加速度/jerkは考慮しない)。ponytail: 必要になったら台形/S字速度プロファイルへ拡張。
 std::vector<float> time_parameterize(const std::vector<JointState>& traj, const std::vector<float>& velocity_limits) {
   std::vector<float> times(traj.size(), 0.0f);
@@ -253,12 +302,25 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
     std::vector<bool> repaired = rw.repair_waypoints(failing, kRepairStep, kRepairDelta, kRepairMaxIterations);
     bool all_ok                = std::all_of(repaired.begin(), repaired.end(), [](bool b) { return b; });
 
-    if(all_ok) {
-      shortcut_smooth(rw, traj, kShortcutIterations);
+    if(all_ok && finalize_trajectory(rw, robot, traj, config_.constraints)) {
       result.success            = true;
       result.trajectory         = std::move(traj);
       result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
       result.status             = "success";
+      return result;
+    }
+  }
+
+  // 直線補間+局所repairが全ラウンド失敗した場合の大域探索フォールバック(cuRoboの並列幾何プランナー相当)。
+  if(plan_config.enable_graph_planner) {
+    cutil::Ref<WorldConfig> world = config_.world_config ? config_.world_config : cutil::make_ref<WorldConfig>();
+    RrtConnectPlanner rrt(config_.robot_config, world, config_.use_vulkan);
+    RrtConnectResult rrt_result = rrt.plan(start_state, goal_state);
+    if(rrt_result.success && finalize_trajectory(rw, robot, rrt_result.trajectory, config_.constraints)) {
+      result.success            = true;
+      result.trajectory         = std::move(rrt_result.trajectory);
+      result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
+      result.status             = "success (RRT-Connect fallback)";
       return result;
     }
   }

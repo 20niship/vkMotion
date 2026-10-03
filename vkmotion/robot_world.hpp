@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "allowed_collision_matrix.hpp"
 #include "robot_config.hpp"
 #include "types.hpp"
 #include "world_config.hpp"
@@ -18,6 +19,7 @@ struct RobotWorldConfig {
   cutil::Ref<RobotConfig> robot_config;
   cutil::Ref<WorldConfig> world_config;
   bool use_vulkan = true;
+  AllowedCollisionMatrix acm;  // self-collision(CPU)とCPU側world障害物チェックに適用。GPU経路のworld障害物チェックは未対応(下記参照)。
 };
 
 // Robot-world and self collision queries (cuRobo: curobo.wrap.model.robot_world.RobotWorld).
