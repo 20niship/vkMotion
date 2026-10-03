@@ -6,6 +6,7 @@
 
 #include "ik_solver.hpp"
 #include "robot_world.hpp"
+#include "rrt_connect.hpp"
 
 namespace vkmotion {
 
@@ -13,11 +14,11 @@ namespace {
 
 constexpr float kRepairDelta             = 1e-2f;
 constexpr float kRepairStep              = 0.05f;
-constexpr int kRepairMaxIterations       = 80;
-constexpr int kShortcutIterations        = 60;
+constexpr int kRepairMaxIterations       = 40;
+constexpr int kShortcutIterations        = 15;  // kCandidatesPerRound(5)個/roundなので総候補数は旧60回相当
 constexpr float kMinDt                   = 1e-3f;
 // OMPLのlongest_valid_segment_fraction相当。固定waypoint数だと長距離移動で間隔が粗くなり薄い障害物を見逃すため関節空間距離に応じて点数を決める。
-constexpr float kCollisionCheckResolution = 0.03f;  // rad, 隣接waypoint間の最大関節角ステップ
+constexpr float kCollisionCheckResolution = 0.08f;  // rad, 隣接waypoint間の最大関節角ステップ
 constexpr int kMinWaypoints               = 11;
 constexpr int kMaxWaypoints               = 400;
 
@@ -89,28 +90,110 @@ std::vector<JointState> via_point_trajectory(const JointState& start, const Join
 }
 
 // ランダムな2点[i,j]を直線で結び直し、衝突フリーかつ短くなるなら置き換える標準的なshortcut smoothing。
-void shortcut_smooth(const RobotWorld& rw, std::vector<JointState>& traj, int iterations) {
+// 候補を1個ずつdispatchすると往復コストが支配的になるため、ラウンドごとにkCandidatesPerRound個をまとめて1 dispatchで評価し最良のものだけ採用する。
+constexpr int kCandidatesPerRound = 5;
+
+void shortcut_smooth(const RobotWorld& rw, std::vector<JointState>& traj, int rounds) {
   if(traj.size() < 4) return;
-  for(int iter = 0; iter < iterations; iter++) {
-    std::uniform_int_distribution<int> i_dist(0, static_cast<int>(traj.size()) - 3);
-    int i = i_dist(rng());
-    std::uniform_int_distribution<int> j_dist(i + 2, static_cast<int>(traj.size()) - 1);
-    int j = j_dist(rng());
+  for(int round = 0; round < rounds; round++) {
+    int n = static_cast<int>(traj.size());
+    if(n < 4) break;
 
-    std::vector<JointState> candidate = linear_interpolate(traj[i], traj[j], j - i + 1);
-    std::vector<JointState> interior(candidate.begin() + 1, candidate.end() - 1);
-    std::vector<bool> free            = rw.is_collision_free_batch(interior);
-    if(!std::all_of(free.begin(), free.end(), [](bool b) { return b; })) continue;
+    struct Candidate {
+      int i, j;
+      std::vector<JointState> points;  // i..j inclusive, straight-line replacement
+    };
+    std::vector<Candidate> candidates;
+    std::vector<JointState> all_interior;
+    std::vector<size_t> interior_counts;
 
-    float old_len = 0.0f;
-    for(int k = i + 1; k <= j; k++) old_len += joint_delta_norm(traj[k], traj[k - 1]);
-    float new_len = 0.0f;
-    for(size_t k = 1; k < candidate.size(); k++) new_len += joint_delta_norm(candidate[k], candidate[k - 1]);
-    if(new_len >= old_len - 1e-6f) continue;
+    for(int c = 0; c < kCandidatesPerRound; c++) {
+      std::uniform_int_distribution<int> i_dist(0, n - 3);
+      int i = i_dist(rng());
+      std::uniform_int_distribution<int> j_dist(i + 2, n - 1);
+      int j = j_dist(rng());
+      std::vector<JointState> pts = linear_interpolate(traj[i], traj[j], j - i + 1);
+      interior_counts.push_back(pts.size() - 2);
+      all_interior.insert(all_interior.end(), pts.begin() + 1, pts.end() - 1);
+      candidates.push_back({i, j, std::move(pts)});
+    }
 
-    traj.erase(traj.begin() + i + 1, traj.begin() + j);
-    traj.insert(traj.begin() + i + 1, candidate.begin() + 1, candidate.end() - 1);
+    std::vector<bool> free = rw.is_collision_free_batch(all_interior);
+
+    int best            = -1;
+    float best_reduction = 0.0f;
+    size_t offset         = 0;
+    for(size_t c = 0; c < candidates.size(); c++) {
+      size_t cnt = interior_counts[c];
+      bool all_free = std::all_of(free.begin() + offset, free.begin() + offset + cnt, [](bool b) { return b; });
+      offset += cnt;
+      if(!all_free) continue;
+
+      const Candidate& cand = candidates[c];
+      float old_len = 0.0f;
+      for(int k = cand.i + 1; k <= cand.j; k++) old_len += joint_delta_norm(traj[k], traj[k - 1]);
+      float new_len = 0.0f;
+      for(size_t k = 1; k < cand.points.size(); k++) new_len += joint_delta_norm(cand.points[k], cand.points[k - 1]);
+      float reduction = old_len - new_len;
+      if(reduction > best_reduction) {
+        best_reduction = reduction;
+        best            = static_cast<int>(c);
+      }
+    }
+
+    if(best < 0) continue;
+    const Candidate& cand = candidates[static_cast<size_t>(best)];
+    traj.erase(traj.begin() + cand.i + 1, traj.begin() + cand.j);
+    traj.insert(traj.begin() + cand.i + 1, cand.points.begin() + 1, cand.points.end() - 1);
   }
+}
+
+// Constraint違反を数値勾配降下で下げる。ponytail: 制約チェック自体が軽量なCPU計算なのでGPU化しない。
+bool repair_constraint_violation(const ConstraintSet& constraints, const RobotConfig& robot, std::vector<float>& q, int max_iterations) {
+  constexpr float kDelta = 1e-2f;
+  constexpr float kStep  = 0.05f;
+  const auto& lower = robot.joint_position_limits_lower();
+  const auto& upper = robot.joint_position_limits_upper();
+  const size_t dof  = q.size();
+
+  if(constraints.total_violation(JointState{q, {}}, robot) <= 0.0f) return true;
+  for(int iter = 0; iter < max_iterations; iter++) {
+    std::vector<float> grad(dof, 0.0f);
+    float norm = 0.0f;
+    for(size_t j = 0; j < dof; j++) {
+      std::vector<float> qp = q, qm = q;
+      qp[j] += kDelta;
+      qm[j] -= kDelta;
+      float vp = constraints.total_violation(JointState{qp, {}}, robot);
+      float vm = constraints.total_violation(JointState{qm, {}}, robot);
+      grad[j]  = (vp - vm) / (2.0f * kDelta);
+      norm += grad[j] * grad[j];
+    }
+    norm = std::sqrt(norm);
+    if(norm < 1e-8f) break;
+    for(size_t j = 0; j < dof; j++) {
+      q[j] -= kStep * grad[j] / norm;  // 違反量を下る方向
+      q[j] = std::max(lower[j], std::min(upper[j], q[j]));
+    }
+    if(constraints.total_violation(JointState{q, {}}, robot) <= 0.0f) return true;
+  }
+  return false;
+}
+
+// shortcut平滑化+制約repair+制約repair後の再衝突チェックをまとめる(直線補間経路・RRT-Connect経路どちらの後処理にも使う)。
+bool finalize_trajectory(const RobotWorld& rw, const RobotConfig& robot, std::vector<JointState>& traj, const std::optional<ConstraintSet>& constraints) {
+  shortcut_smooth(rw, traj, kShortcutIterations);
+  if(!constraints.has_value() || constraints->empty()) return true;
+
+  bool ok = true;
+  for(size_t i = 1; i + 1 < traj.size() && ok; i++) {
+    if(!constraints->is_satisfied(traj[i], robot)) ok = repair_constraint_violation(*constraints, robot, traj[i].position, kRepairMaxIterations);
+  }
+  if(!ok) return false;
+
+  std::vector<JointState> interior(traj.begin() + 1, traj.end() - 1);
+  std::vector<bool> still_free = rw.is_collision_free_batch(interior);
+  return std::all_of(still_free.begin(), still_free.end(), [](bool b) { return b; });
 }
 
 // 各関節の速度制限のみを守る素朴な時間パラメタライズ(加速度/jerkは考慮しない)。ponytail: 必要になったら台形/S字速度プロファイルへ拡張。
@@ -219,12 +302,25 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
     std::vector<bool> repaired = rw.repair_waypoints(failing, kRepairStep, kRepairDelta, kRepairMaxIterations);
     bool all_ok                = std::all_of(repaired.begin(), repaired.end(), [](bool b) { return b; });
 
-    if(all_ok) {
-      shortcut_smooth(rw, traj, kShortcutIterations);
+    if(all_ok && finalize_trajectory(rw, robot, traj, config_.constraints)) {
       result.success            = true;
       result.trajectory         = std::move(traj);
       result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
       result.status             = "success";
+      return result;
+    }
+  }
+
+  // 直線補間+局所repairが全ラウンド失敗した場合の大域探索フォールバック(cuRoboの並列幾何プランナー相当)。
+  if(plan_config.enable_graph_planner) {
+    cutil::Ref<WorldConfig> world = config_.world_config ? config_.world_config : cutil::make_ref<WorldConfig>();
+    RrtConnectPlanner rrt(config_.robot_config, world, config_.use_vulkan);
+    RrtConnectResult rrt_result = rrt.plan(start_state, goal_state);
+    if(rrt_result.success && finalize_trajectory(rw, robot, rrt_result.trajectory, config_.constraints)) {
+      result.success            = true;
+      result.trajectory         = std::move(rrt_result.trajectory);
+      result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
+      result.status             = "success (RRT-Connect fallback)";
       return result;
     }
   }

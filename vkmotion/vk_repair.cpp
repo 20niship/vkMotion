@@ -46,6 +46,21 @@ struct GpuCapsule {
   float base_radius[4];
   float tip[4];
 };
+struct GpuPlane {
+  float pos[4];
+  float quat[4];
+};
+struct GpuConvexMeta {
+  float pos[4];
+  float quat[4];
+  int32_t offset_count[4];
+};
+struct GpuSdfMeta {
+  float pos[4];
+  float quat[4];
+  float dims[4];
+  int32_t res_offset[4];
+};
 
 struct PushConstants {
   uint32_t num_joints;
@@ -55,6 +70,9 @@ struct PushConstants {
   uint32_t num_sphere_obstacles;
   uint32_t num_cylinders;
   uint32_t num_capsules;
+  uint32_t num_planes;
+  uint32_t num_convex;
+  uint32_t num_sdf;
   uint32_t max_iterations;
   float repair_step;
   float repair_delta;
@@ -79,7 +97,7 @@ void ensure_capacity(VkContext& ctx, std::unique_ptr<VkStorageBuffer>& buf, size
 
 VkRepairPipeline::VkRepairPipeline(VkContext& ctx, const RobotConfig& robot) : ctx_(ctx) {
   std::string spv_path = std::string(VKMOTION_SHADER_DIR) + "/repair_waypoints.comp.spv";
-  pipeline_             = std::make_unique<VkComputePipeline>(ctx_, spv_path, /*num_storage_bindings=*/10, /*push_constant_bytes=*/sizeof(PushConstants));
+  pipeline_             = std::make_unique<VkComputePipeline>(ctx_, spv_path, /*num_storage_bindings=*/15, /*push_constant_bytes=*/sizeof(PushConstants));
 
   const UrdfModel& model = robot.urdf_model();
   SerialChain chain       = build_serial_chain(model);
@@ -189,6 +207,41 @@ std::vector<bool> VkRepairPipeline::repair(std::vector<std::vector<float>*>& qs,
     capsules[i].tip[2]         = o.tip[2];
   }
 
+  std::vector<GpuPlane> planes(std::max<size_t>(1, world.plane().size()));
+  for(size_t i = 0; i < world.plane().size(); i++) pack_pose(world.plane()[i].pose, planes[i].pos, planes[i].quat);
+
+  std::vector<GpuConvexMeta> convex_metas(std::max<size_t>(1, world.convex_mesh().size()));
+  std::vector<float> convex_verts;
+  for(size_t i = 0; i < world.convex_mesh().size(); i++) {
+    const auto& o = world.convex_mesh()[i];
+    pack_pose(o.pose, convex_metas[i].pos, convex_metas[i].quat);
+    convex_metas[i].offset_count[0] = static_cast<int32_t>(convex_verts.size() / 4);
+    convex_metas[i].offset_count[1] = static_cast<int32_t>(o.vertices.size());
+    for(const auto& v : o.vertices) {
+      convex_verts.push_back(v[0]);
+      convex_verts.push_back(v[1]);
+      convex_verts.push_back(v[2]);
+      convex_verts.push_back(0.0f);
+    }
+  }
+  if(convex_verts.empty()) convex_verts.assign(4, 0.0f);
+
+  std::vector<GpuSdfMeta> sdf_metas(std::max<size_t>(1, world.sdf_grid().size()));
+  std::vector<float> sdf_data;
+  for(size_t i = 0; i < world.sdf_grid().size(); i++) {
+    const auto& o = world.sdf_grid()[i];
+    pack_pose(o.pose, sdf_metas[i].pos, sdf_metas[i].quat);
+    sdf_metas[i].dims[0]       = o.dims[0];
+    sdf_metas[i].dims[1]       = o.dims[1];
+    sdf_metas[i].dims[2]       = o.dims[2];
+    sdf_metas[i].res_offset[0] = o.resolution[0];
+    sdf_metas[i].res_offset[1] = o.resolution[1];
+    sdf_metas[i].res_offset[2] = o.resolution[2];
+    sdf_metas[i].res_offset[3] = static_cast<int32_t>(sdf_data.size());
+    sdf_data.insert(sdf_data.end(), o.distances.begin(), o.distances.end());
+  }
+  if(sdf_data.empty()) sdf_data.assign(1, 0.0f);
+
   std::vector<float> initial_q(qs.size() * num_dof_);
   for(size_t i = 0; i < qs.size(); i++)
     for(uint32_t j = 0; j < num_dof_; j++) initial_q[i * num_dof_ + j] = (*qs[i])[j];
@@ -201,6 +254,16 @@ std::vector<bool> VkRepairPipeline::repair(std::vector<std::vector<float>*>& qs,
   cylinders_buf_->upload(cylinders.data(), cylinders.size() * sizeof(GpuCylinder));
   ensure_capacity(ctx_, capsules_buf_, capsules.size() * sizeof(GpuCapsule));
   capsules_buf_->upload(capsules.data(), capsules.size() * sizeof(GpuCapsule));
+  ensure_capacity(ctx_, planes_buf_, planes.size() * sizeof(GpuPlane));
+  planes_buf_->upload(planes.data(), planes.size() * sizeof(GpuPlane));
+  ensure_capacity(ctx_, convex_meta_buf_, convex_metas.size() * sizeof(GpuConvexMeta));
+  convex_meta_buf_->upload(convex_metas.data(), convex_metas.size() * sizeof(GpuConvexMeta));
+  ensure_capacity(ctx_, convex_verts_buf_, convex_verts.size() * sizeof(float));
+  convex_verts_buf_->upload(convex_verts.data(), convex_verts.size() * sizeof(float));
+  ensure_capacity(ctx_, sdf_meta_buf_, sdf_metas.size() * sizeof(GpuSdfMeta));
+  sdf_meta_buf_->upload(sdf_metas.data(), sdf_metas.size() * sizeof(GpuSdfMeta));
+  ensure_capacity(ctx_, sdf_data_buf_, sdf_data.size() * sizeof(float));
+  sdf_data_buf_->upload(sdf_data.data(), sdf_data.size() * sizeof(float));
   ensure_capacity(ctx_, initial_q_buf_, initial_q.size() * sizeof(float));
   initial_q_buf_->upload(initial_q.data(), initial_q.size() * sizeof(float));
   ensure_capacity(ctx_, out_q_buf_, initial_q.size() * sizeof(float));
@@ -214,6 +277,11 @@ std::vector<bool> VkRepairPipeline::repair(std::vector<std::vector<float>*>& qs,
       spheres_buf_->descriptor_info(),
       cylinders_buf_->descriptor_info(),
       capsules_buf_->descriptor_info(),
+      planes_buf_->descriptor_info(),
+      convex_meta_buf_->descriptor_info(),
+      convex_verts_buf_->descriptor_info(),
+      sdf_meta_buf_->descriptor_info(),
+      sdf_data_buf_->descriptor_info(),
       initial_q_buf_->descriptor_info(),
       out_q_buf_->descriptor_info(),
       out_success_buf_->descriptor_info(),
@@ -227,6 +295,9 @@ std::vector<bool> VkRepairPipeline::repair(std::vector<std::vector<float>*>& qs,
   pc.num_sphere_obstacles = static_cast<uint32_t>(world.sphere().size());
   pc.num_cylinders         = static_cast<uint32_t>(world.cylinder().size());
   pc.num_capsules          = static_cast<uint32_t>(world.capsule().size());
+  pc.num_planes            = static_cast<uint32_t>(world.plane().size());
+  pc.num_convex            = static_cast<uint32_t>(world.convex_mesh().size());
+  pc.num_sdf               = static_cast<uint32_t>(world.sdf_grid().size());
   pc.max_iterations        = max_iterations;
   pc.repair_step            = repair_step;
   pc.repair_delta           = repair_delta;

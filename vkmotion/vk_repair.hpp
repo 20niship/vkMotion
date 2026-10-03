@@ -30,6 +30,7 @@ class VkRepairPipeline {
   std::unique_ptr<VkComputePipeline> pipeline_;
   std::unique_ptr<VkStorageBuffer> joints_buf_, robot_spheres_buf_, dof_limits_buf_;
   std::unique_ptr<VkStorageBuffer> cuboids_buf_, spheres_buf_, cylinders_buf_, capsules_buf_;
+  std::unique_ptr<VkStorageBuffer> planes_buf_, convex_meta_buf_, convex_verts_buf_, sdf_meta_buf_, sdf_data_buf_;
   std::unique_ptr<VkStorageBuffer> initial_q_buf_, out_q_buf_, out_success_buf_;
   uint32_t num_joints_        = 0;
   uint32_t num_dof_           = 0;

@@ -18,7 +18,7 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr int kObstacleSetupAttempts = 8;
+constexpr int kObstacleSetupAttempts = 20;
 
 json pose_json(const cutil::Vec3f& pos, const cutil::Quatf& q) {
   return json::array({pos[0], pos[1], pos[2], q.w, q.x, q.y, q.z});
@@ -62,7 +62,8 @@ cutil::Vec3f random_direction(std::mt19937& rng) {
 
 // Obstacle of random shape/size (scaled off `reach`) centered at `center`.
 void add_obstacle_at(std::mt19937& rng, const cutil::Vec3f& center, float reach, int index, WorldConfig& world, json& obstacles_json) {
-  std::uniform_int_distribution<int> type_pick(0, 3);
+  // planeは無限平面でランダム配置だと可動域全体を塞いでしまいがちなためstress testでは出さない(単体テストで動作確認済み)。index4=plane, index5=convex。
+  std::discrete_distribution<int> type_pick({1, 1, 1, 1, 0, 1});
   std::uniform_real_distribution<float> small(reach * 0.05f, reach * 0.18f);
   Pose pose{center, random_quaternion(rng)};
   std::string name = "obs" + std::to_string(index);
@@ -104,7 +105,7 @@ void add_obstacle_at(std::mt19937& rng, const cutil::Vec3f& center, float reach,
       o["height"] = c.height;
       break;
     }
-    default: {
+    case 3: {
       Capsule c;
       c.name    = name;
       c.pose    = pose;
@@ -117,6 +118,29 @@ void add_obstacle_at(std::mt19937& rng, const cutil::Vec3f& center, float reach,
       o["radius"] = c.radius;
       o["base"]   = json::array({c.base[0], c.base[1], c.base[2]});
       o["tip"]    = json::array({c.tip[0], c.tip[1], c.tip[2]});
+      break;
+    }
+    case 4: {
+      Plane p;
+      p.name = name;
+      p.pose = pose;
+      world.add_obstacle(p);
+      o["type"] = "plane";
+      break;
+    }
+    default: {
+      ConvexMesh c;
+      c.name = name;
+      c.pose = pose;
+      float r = small(rng);
+      c.vertices.push_back(cutil::Vec3f(r, r, r));
+      c.vertices.push_back(cutil::Vec3f(r, -r, -r));
+      c.vertices.push_back(cutil::Vec3f(-r, r, -r));
+      c.vertices.push_back(cutil::Vec3f(-r, -r, r));
+      world.add_obstacle(c);
+      o["type"]     = "convex";
+      o["vertices"] = json::array();
+      for(const auto& v : c.vertices) o["vertices"].push_back(json::array({v[0], v[1], v[2]}));
       break;
     }
   }

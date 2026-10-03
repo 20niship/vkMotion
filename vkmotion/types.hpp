@@ -55,4 +55,27 @@ struct Capsule : Obstacle {
   cutil::Vec3f tip{};
 };
 
+// Infinite plane; normal is pose.quaternion-rotated +Z, offset is pose.position.
+struct Plane : Obstacle {};
+
+// Convex hull given directly as world/local vertices (no mesh file loading); CPU/GPU both solve via GJK.
+struct ConvexMesh : Obstacle {
+  std::vector<cutil::Vec3f> vertices;  // local-frame
+};
+
+// Voxel SDF grid (cuRobo: VoxelGrid). pose.position = min corner; resolution = grid points per axis (dims/(resolution-1) = cell size); distances flattened x-fastest.
+struct SDFGrid : Obstacle {
+  cutil::Vec3f dims{};
+  int resolution[3] = {0, 0, 0};
+  std::vector<float> distances;
+};
+
+// Sphere rigidly carried by a robot link (MoveIt2: attached collision object). Modeled as an extra link_name-tagged CollisionSphere, not a full Obstacle shape, so it reuses the sphere-vs-primitive pipeline and same-link/adjacent exclusion as-is; approximate a non-spherical held object with several of these. center is link-local.
+struct AttachedObject {
+  std::string name;
+  std::string link_name;
+  cutil::Vec3f center{};
+  float radius = 0.0f;
+};
+
 }  // namespace vkmotion

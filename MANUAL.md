@@ -178,6 +178,35 @@ class RobotWorld {
 
 対応テスト: `tests/test_collision_cpu.cpp`(`use_vulkan=false`)、`tests/test_collision_vulkan.cpp`(`use_vulkan=true`、CPU版と出力一致を確認)、`tests/test_collision_gt.cpp`(Python cuRoboで生成したハードコードGTと比較)。
 
+## 3.5 `AllowedCollisionMatrix` / `AttachedObject` — MoveIt2のACM/attached object相当
+
+`vkmotion/allowed_collision_matrix.hpp`, `vkmotion/types.hpp`
+
+```cpp
+namespace vkmotion {
+
+class AllowedCollisionMatrix {
+ public:
+  void disable_collision(const std::string& a, const std::string& b);  // 対称、名前は link_name か Obstacle::name
+  bool is_allowed(const std::string& a, const std::string& b) const;
+};
+
+// link_nameを持つ普通のCollisionSphereとして追加される「掴んだ物体」。center/radiusはlinkローカル座標。
+struct AttachedObject {
+  std::string name;
+  std::string link_name;
+  cutil::Vec3f center;
+  float radius;
+};
+
+}  // namespace vkmotion
+```
+
+- `RobotWorldConfig::acm`に設定したペアは、自己衝突(`get_self_collision_distance`)とworld障害物衝突(`get_collision_distance`、CPU経路)で追加の除外ルールとして使われる。
+- `WorldConfig::add_attached_object()`で登録したAttachedObjectは、毎クエリで追従先リンクのFK結果から現在のワールド座標を再計算し、通常のCollisionSphereと同様にself-collision/world-collisionチェックに加わる(自分自身が属するリンク・隣接リンクとは`is_adjacent`で既に除外される)。
+- `get_collision_distance`/`get_self_collision_distance`/`get_min_world_collision_distance_batch`/`is_collision_free_batch`はCPU・GPUどちらの経路でもAttachedObjectに対応する(普通のCollisionSphereとして扱われるだけで、シェーダ変更が不要なため)。**GPU常駐の`RobotWorld::repair_waypoints`(`use_vulkan=true`)のみAttachedObject未対応**(ロボット構造を構築時に1回だけアップロードする設計のため。`use_vulkan=false`のCPU repairは対応済み)。
+- ACMはCPU経路のworld障害物チェックにのみ適用される(GPU経路の`get_collision_distance`等はACMを見ない、全ロボット球に対して全障害物をチェックする)。
+
 ## 4. `IKSolver` — 逆運動学
 
 `vkmotion/ik_solver.hpp`
@@ -267,6 +296,92 @@ class MotionGen {
 2. 各初期値から軌道最適化(勾配降下 / L-BFGS相当 + `RobotWorld`の衝突距離をコスト項として使用)を並列実行
 3. 衝突なし・関節limit内で最初に収束した軌道を採用、`MotionGenResult`に詰めて返す
 4. 全シード失敗なら `enable_graph_planner` が真なら幾何プランナーにフォールバック(未実装の間は `success=false`)
+
+## 5.5 `CartesianPathPlanner` — 直線Cartesianパス(MoveIt2: computeCartesianPath)
+
+`vkmotion/cartesian_path.hpp`
+
+エンドエフェクタをCartesian空間(位置+姿勢)で直線的に動かしたい場合に使う。`MotionGen`は関節空間で直線補間するため、生成される経路はCartesian空間では一般に曲線になる。これに対し`CartesianPathPlanner`は目標Poseの列を位置lerp+姿勢slerpで細かく分割し、各点をIKチェイニング(直前の解を次のシードにする)で解くことで、エンドエフェクタの軌跡そのものを直線に保つ。
+
+```cpp
+struct CartesianWaypoint { Pose pose; };
+
+struct CartesianPathConfig {
+  float max_step         = 0.01f;  // 隣接補間点間の最大直線距離[m]
+  float max_angular_step = 0.05f;  // 隣接補間点間の最大回転角[rad]
+  float min_fraction      = 1.0f;  // この到達率未満なら失敗扱い
+};
+
+struct CartesianPathResult {
+  bool success;
+  float fraction_achieved;  // MoveIt2のcomputeCartesianPathと同様、0.0〜1.0の到達率
+  std::vector<JointState> trajectory;
+  std::string status;
+};
+
+class CartesianPathPlanner {
+ public:
+  explicit CartesianPathPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan = true);
+  CartesianPathResult compute_cartesian_path(const JointState& start_state, const std::vector<CartesianWaypoint>& waypoints,
+                                              const CartesianPathConfig& config = {});
+};
+```
+
+- IKで解けない、または衝突する中間点に到達した時点で経路を打ち切り、そこまでの到達率を`fraction_achieved`に入れる(`min_fraction`以上なら成功扱い)
+- IKチェイニング自体は逐次処理だが、各ステップのIK自体は既存の`IKSolver`(複数シード並列)をそのまま使う
+
+## 5.6 `Constraint` / `ConstraintSet` — path constraints(MoveIt2: position/orientation/joint constraints)
+
+`vkmotion/constraints.hpp`
+
+C++20 conceptで「制約」を定義し、具象型(`JointConstraint`/`PositionConstraint`/`OrientationConstraint`)がそれを満たす。ヘテロな制約集合は`std::variant`+`std::visit`で型消去した`ConstraintSet`に保持する。
+
+```cpp
+template <typename T>
+concept Constraint = requires(const T& c, const JointState& js, const RobotConfig& robot) {
+  { c.is_satisfied(js, robot) } -> std::convertible_to<bool>;
+  { c.violation(js, robot) } -> std::convertible_to<float>;  // 0以下なら満たす、正なら違反量
+};
+
+struct JointConstraint { int joint_index; float lower, upper; /* URDFのlimitより厳しい一時範囲 */ };
+struct PositionConstraint { cutil::Vec3f target, tolerance; /* エンドエフェクタ位置のボックス制約 */ };
+struct OrientationConstraint { cutil::Quatf target; float tolerance_rad; /* エンドエフェクタ姿勢の角度制約 */ };
+
+class ConstraintSet {
+ public:
+  template <Constraint T> void add(T c);
+  bool is_satisfied(const JointState&, const RobotConfig&) const;   // 全制約のAND
+  float total_violation(const JointState&, const RobotConfig&) const; // repair用の目的関数
+};
+```
+
+`MotionGenConfig::constraints`(`std::optional<ConstraintSet>`、既定`nullopt`)に設定すると、`MotionGen::plan_single_js`は衝突repair・shortcut後に制約違反waypointを数値勾配降下で修正し、修正後も衝突フリーであることを再確認してから成功を返す(未設定時は従来どおり制約判定を一切行わない)。制約チェック自体は軽量なCPU計算なのでGPU化していない。
+
+## 5.7 `RrtConnectPlanner` — 幾何プランナーフォールバック(cuMotionの並列RRT-Connect相当)
+
+`vkmotion/rrt_connect.hpp`
+
+直線補間+局所勾配repairだけでは迂回できない大域的な障害物配置向けの、双方向木のRRT-Connect。
+
+```cpp
+struct RrtConnectConfig {
+  int max_iterations = 2000;
+  float step_size = 0.1f;
+  int max_samples_per_batch = 16;  // ランダムサンプルをまとめて1回のバッチdispatchで衝突チェックする数
+};
+struct RrtConnectResult {
+  bool success = false;
+  std::vector<JointState> trajectory;  // 粗いwaypoint列、呼び出し側でshortcut/time parameterizeする前提
+  std::string status;
+};
+class RrtConnectPlanner {
+ public:
+  explicit RrtConnectPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan = true);
+  RrtConnectResult plan(const JointState& start, const JointState& goal, const RrtConnectConfig& config = {});
+};
+```
+
+`MotionGenPlanConfig::enable_graph_planner`(既定`true`)が有効な場合、`MotionGen::plan_single_js`は直線補間+局所repairの全ラウンドが失敗した後、最後の手段として`RrtConnectPlanner`を1回呼ぶ。見つかった粗い経路にはshortcut平滑化・制約repair・時間パラメタライズが通常通り適用される。
 
 ## 6. 実装フェーズとの対応
 
