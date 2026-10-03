@@ -330,6 +330,33 @@ class CartesianPathPlanner {
 - IKで解けない、または衝突する中間点に到達した時点で経路を打ち切り、そこまでの到達率を`fraction_achieved`に入れる(`min_fraction`以上なら成功扱い)
 - IKチェイニング自体は逐次処理だが、各ステップのIK自体は既存の`IKSolver`(複数シード並列)をそのまま使う
 
+## 5.6 `Constraint` / `ConstraintSet` — path constraints(MoveIt2: position/orientation/joint constraints)
+
+`vkmotion/constraints.hpp`
+
+C++20 conceptで「制約」を定義し、具象型(`JointConstraint`/`PositionConstraint`/`OrientationConstraint`)がそれを満たす。ヘテロな制約集合は`std::variant`+`std::visit`で型消去した`ConstraintSet`に保持する。
+
+```cpp
+template <typename T>
+concept Constraint = requires(const T& c, const JointState& js, const RobotConfig& robot) {
+  { c.is_satisfied(js, robot) } -> std::convertible_to<bool>;
+  { c.violation(js, robot) } -> std::convertible_to<float>;  // 0以下なら満たす、正なら違反量
+};
+
+struct JointConstraint { int joint_index; float lower, upper; /* URDFのlimitより厳しい一時範囲 */ };
+struct PositionConstraint { cutil::Vec3f target, tolerance; /* エンドエフェクタ位置のボックス制約 */ };
+struct OrientationConstraint { cutil::Quatf target; float tolerance_rad; /* エンドエフェクタ姿勢の角度制約 */ };
+
+class ConstraintSet {
+ public:
+  template <Constraint T> void add(T c);
+  bool is_satisfied(const JointState&, const RobotConfig&) const;   // 全制約のAND
+  float total_violation(const JointState&, const RobotConfig&) const; // repair用の目的関数
+};
+```
+
+`MotionGenConfig::constraints`(`std::optional<ConstraintSet>`、既定`nullopt`)に設定すると、`MotionGen::plan_single_js`は衝突repair・shortcut後に制約違反waypointを数値勾配降下で修正し、修正後も衝突フリーであることを再確認してから成功を返す(未設定時は従来どおり制約判定を一切行わない)。制約チェック自体は軽量なCPU計算なのでGPU化していない。
+
 ## 6. 実装フェーズとの対応
 
 | マニュアル節 | PLAN.mdのフェーズ |

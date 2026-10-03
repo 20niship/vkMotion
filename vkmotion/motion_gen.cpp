@@ -147,6 +147,38 @@ void shortcut_smooth(const RobotWorld& rw, std::vector<JointState>& traj, int ro
   }
 }
 
+// Constraint違反を数値勾配降下で下げる。ponytail: 制約チェック自体が軽量なCPU計算なのでGPU化しない。
+bool repair_constraint_violation(const ConstraintSet& constraints, const RobotConfig& robot, std::vector<float>& q, int max_iterations) {
+  constexpr float kDelta = 1e-2f;
+  constexpr float kStep  = 0.05f;
+  const auto& lower = robot.joint_position_limits_lower();
+  const auto& upper = robot.joint_position_limits_upper();
+  const size_t dof  = q.size();
+
+  if(constraints.total_violation(JointState{q, {}}, robot) <= 0.0f) return true;
+  for(int iter = 0; iter < max_iterations; iter++) {
+    std::vector<float> grad(dof, 0.0f);
+    float norm = 0.0f;
+    for(size_t j = 0; j < dof; j++) {
+      std::vector<float> qp = q, qm = q;
+      qp[j] += kDelta;
+      qm[j] -= kDelta;
+      float vp = constraints.total_violation(JointState{qp, {}}, robot);
+      float vm = constraints.total_violation(JointState{qm, {}}, robot);
+      grad[j]  = (vp - vm) / (2.0f * kDelta);
+      norm += grad[j] * grad[j];
+    }
+    norm = std::sqrt(norm);
+    if(norm < 1e-8f) break;
+    for(size_t j = 0; j < dof; j++) {
+      q[j] -= kStep * grad[j] / norm;  // 違反量を下る方向
+      q[j] = std::max(lower[j], std::min(upper[j], q[j]));
+    }
+    if(constraints.total_violation(JointState{q, {}}, robot) <= 0.0f) return true;
+  }
+  return false;
+}
+
 // 各関節の速度制限のみを守る素朴な時間パラメタライズ(加速度/jerkは考慮しない)。ponytail: 必要になったら台形/S字速度プロファイルへ拡張。
 std::vector<float> time_parameterize(const std::vector<JointState>& traj, const std::vector<float>& velocity_limits) {
   std::vector<float> times(traj.size(), 0.0f);
@@ -255,11 +287,27 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
 
     if(all_ok) {
       shortcut_smooth(rw, traj, kShortcutIterations);
-      result.success            = true;
-      result.trajectory         = std::move(traj);
-      result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
-      result.status             = "success";
-      return result;
+
+      bool constraints_ok = true;
+      if(config_.constraints.has_value() && !config_.constraints->empty()) {
+        for(size_t i = 1; i + 1 < traj.size() && constraints_ok; i++) {
+          if(!config_.constraints->is_satisfied(traj[i], robot))
+            constraints_ok = repair_constraint_violation(*config_.constraints, robot, traj[i].position, kRepairMaxIterations);
+        }
+        if(constraints_ok) {
+          std::vector<JointState> interior(traj.begin() + 1, traj.end() - 1);
+          std::vector<bool> still_free = rw.is_collision_free_batch(interior);
+          constraints_ok               = std::all_of(still_free.begin(), still_free.end(), [](bool b) { return b; });
+        }
+      }
+
+      if(constraints_ok) {
+        result.success            = true;
+        result.trajectory         = std::move(traj);
+        result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
+        result.status             = "success";
+        return result;
+      }
     }
   }
 
