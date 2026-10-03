@@ -357,6 +357,32 @@ class ConstraintSet {
 
 `MotionGenConfig::constraints`(`std::optional<ConstraintSet>`、既定`nullopt`)に設定すると、`MotionGen::plan_single_js`は衝突repair・shortcut後に制約違反waypointを数値勾配降下で修正し、修正後も衝突フリーであることを再確認してから成功を返す(未設定時は従来どおり制約判定を一切行わない)。制約チェック自体は軽量なCPU計算なのでGPU化していない。
 
+## 5.7 `RrtConnectPlanner` — 幾何プランナーフォールバック(cuMotionの並列RRT-Connect相当)
+
+`vkmotion/rrt_connect.hpp`
+
+直線補間+局所勾配repairだけでは迂回できない大域的な障害物配置向けの、双方向木のRRT-Connect。
+
+```cpp
+struct RrtConnectConfig {
+  int max_iterations = 2000;
+  float step_size = 0.1f;
+  int max_samples_per_batch = 16;  // ランダムサンプルをまとめて1回のバッチdispatchで衝突チェックする数
+};
+struct RrtConnectResult {
+  bool success = false;
+  std::vector<JointState> trajectory;  // 粗いwaypoint列、呼び出し側でshortcut/time parameterizeする前提
+  std::string status;
+};
+class RrtConnectPlanner {
+ public:
+  explicit RrtConnectPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan = true);
+  RrtConnectResult plan(const JointState& start, const JointState& goal, const RrtConnectConfig& config = {});
+};
+```
+
+`MotionGenPlanConfig::enable_graph_planner`(既定`true`)が有効な場合、`MotionGen::plan_single_js`は直線補間+局所repairの全ラウンドが失敗した後、最後の手段として`RrtConnectPlanner`を1回呼ぶ。見つかった粗い経路にはshortcut平滑化・制約repair・時間パラメタライズが通常通り適用される。
+
 ## 6. 実装フェーズとの対応
 
 | マニュアル節 | PLAN.mdのフェーズ |

@@ -26,7 +26,7 @@ struct MotionGenConfig {
 
 struct MotionGenPlanConfig {
   int max_attempts         = 10;
-  bool enable_graph_planner = true;  // TODO: 幾何プランナー未実装のため現状無視される
+  bool enable_graph_planner = true;  // trueなら直線補間+局所repairが全滅した後にRRT-Connectフォールバックを試す
   float timeout_seconds    = 5.0f;
 };
 

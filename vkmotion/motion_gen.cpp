@@ -6,6 +6,7 @@
 
 #include "ik_solver.hpp"
 #include "robot_world.hpp"
+#include "rrt_connect.hpp"
 
 namespace vkmotion {
 
@@ -179,6 +180,22 @@ bool repair_constraint_violation(const ConstraintSet& constraints, const RobotCo
   return false;
 }
 
+// shortcut平滑化+制約repair+制約repair後の再衝突チェックをまとめる(直線補間経路・RRT-Connect経路どちらの後処理にも使う)。
+bool finalize_trajectory(const RobotWorld& rw, const RobotConfig& robot, std::vector<JointState>& traj, const std::optional<ConstraintSet>& constraints) {
+  shortcut_smooth(rw, traj, kShortcutIterations);
+  if(!constraints.has_value() || constraints->empty()) return true;
+
+  bool ok = true;
+  for(size_t i = 1; i + 1 < traj.size() && ok; i++) {
+    if(!constraints->is_satisfied(traj[i], robot)) ok = repair_constraint_violation(*constraints, robot, traj[i].position, kRepairMaxIterations);
+  }
+  if(!ok) return false;
+
+  std::vector<JointState> interior(traj.begin() + 1, traj.end() - 1);
+  std::vector<bool> still_free = rw.is_collision_free_batch(interior);
+  return std::all_of(still_free.begin(), still_free.end(), [](bool b) { return b; });
+}
+
 // 各関節の速度制限のみを守る素朴な時間パラメタライズ(加速度/jerkは考慮しない)。ponytail: 必要になったら台形/S字速度プロファイルへ拡張。
 std::vector<float> time_parameterize(const std::vector<JointState>& traj, const std::vector<float>& velocity_limits) {
   std::vector<float> times(traj.size(), 0.0f);
@@ -285,29 +302,26 @@ MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const J
     std::vector<bool> repaired = rw.repair_waypoints(failing, kRepairStep, kRepairDelta, kRepairMaxIterations);
     bool all_ok                = std::all_of(repaired.begin(), repaired.end(), [](bool b) { return b; });
 
-    if(all_ok) {
-      shortcut_smooth(rw, traj, kShortcutIterations);
+    if(all_ok && finalize_trajectory(rw, robot, traj, config_.constraints)) {
+      result.success            = true;
+      result.trajectory         = std::move(traj);
+      result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
+      result.status             = "success";
+      return result;
+    }
+  }
 
-      bool constraints_ok = true;
-      if(config_.constraints.has_value() && !config_.constraints->empty()) {
-        for(size_t i = 1; i + 1 < traj.size() && constraints_ok; i++) {
-          if(!config_.constraints->is_satisfied(traj[i], robot))
-            constraints_ok = repair_constraint_violation(*config_.constraints, robot, traj[i].position, kRepairMaxIterations);
-        }
-        if(constraints_ok) {
-          std::vector<JointState> interior(traj.begin() + 1, traj.end() - 1);
-          std::vector<bool> still_free = rw.is_collision_free_batch(interior);
-          constraints_ok               = std::all_of(still_free.begin(), still_free.end(), [](bool b) { return b; });
-        }
-      }
-
-      if(constraints_ok) {
-        result.success            = true;
-        result.trajectory         = std::move(traj);
-        result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
-        result.status             = "success";
-        return result;
-      }
+  // 直線補間+局所repairが全ラウンド失敗した場合の大域探索フォールバック(cuRoboの並列幾何プランナー相当)。
+  if(plan_config.enable_graph_planner) {
+    cutil::Ref<WorldConfig> world = config_.world_config ? config_.world_config : cutil::make_ref<WorldConfig>();
+    RrtConnectPlanner rrt(config_.robot_config, world, config_.use_vulkan);
+    RrtConnectResult rrt_result = rrt.plan(start_state, goal_state);
+    if(rrt_result.success && finalize_trajectory(rw, robot, rrt_result.trajectory, config_.constraints)) {
+      result.success            = true;
+      result.trajectory         = std::move(rrt_result.trajectory);
+      result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits());
+      result.status             = "success (RRT-Connect fallback)";
+      return result;
     }
   }
 
