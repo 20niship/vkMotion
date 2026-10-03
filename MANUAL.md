@@ -178,6 +178,35 @@ class RobotWorld {
 
 対応テスト: `tests/test_collision_cpu.cpp`(`use_vulkan=false`)、`tests/test_collision_vulkan.cpp`(`use_vulkan=true`、CPU版と出力一致を確認)、`tests/test_collision_gt.cpp`(Python cuRoboで生成したハードコードGTと比較)。
 
+## 3.5 `AllowedCollisionMatrix` / `AttachedObject` — MoveIt2のACM/attached object相当
+
+`vkmotion/allowed_collision_matrix.hpp`, `vkmotion/types.hpp`
+
+```cpp
+namespace vkmotion {
+
+class AllowedCollisionMatrix {
+ public:
+  void disable_collision(const std::string& a, const std::string& b);  // 対称、名前は link_name か Obstacle::name
+  bool is_allowed(const std::string& a, const std::string& b) const;
+};
+
+// link_nameを持つ普通のCollisionSphereとして追加される「掴んだ物体」。center/radiusはlinkローカル座標。
+struct AttachedObject {
+  std::string name;
+  std::string link_name;
+  cutil::Vec3f center;
+  float radius;
+};
+
+}  // namespace vkmotion
+```
+
+- `RobotWorldConfig::acm`に設定したペアは、自己衝突(`get_self_collision_distance`)とworld障害物衝突(`get_collision_distance`、CPU経路)で追加の除外ルールとして使われる。
+- `WorldConfig::add_attached_object()`で登録したAttachedObjectは、毎クエリで追従先リンクのFK結果から現在のワールド座標を再計算し、通常のCollisionSphereと同様にself-collision/world-collisionチェックに加わる(自分自身が属するリンク・隣接リンクとは`is_adjacent`で既に除外される)。
+- `get_collision_distance`/`get_self_collision_distance`/`get_min_world_collision_distance_batch`/`is_collision_free_batch`はCPU・GPUどちらの経路でもAttachedObjectに対応する(普通のCollisionSphereとして扱われるだけで、シェーダ変更が不要なため)。**GPU常駐の`RobotWorld::repair_waypoints`(`use_vulkan=true`)のみAttachedObject未対応**(ロボット構造を構築時に1回だけアップロードする設計のため。`use_vulkan=false`のCPU repairは対応済み)。
+- ACMはCPU経路のworld障害物チェックにのみ適用される(GPU経路の`get_collision_distance`等はACMを見ない、全ロボット球に対して全障害物をチェックする)。
+
 ## 4. `IKSolver` — 逆運動学
 
 `vkmotion/ik_solver.hpp`

@@ -33,6 +33,85 @@ TEST_CASE("RobotWorld: obstacle overlapping the workspace is detected") {
   CHECK_FALSE(rw.is_collision_free(JointState{{0.0f, 0.0f}, {}}));
 }
 
+TEST_CASE("AllowedCollisionMatrix: disable_collision is symmetric") {
+  AllowedCollisionMatrix acm;
+  CHECK_FALSE(acm.is_allowed("a", "b"));
+  acm.disable_collision("a", "b");
+  CHECK(acm.is_allowed("a", "b"));
+  CHECK(acm.is_allowed("b", "a"));
+  CHECK_FALSE(acm.is_allowed("a", "c"));
+}
+
+TEST_CASE("RobotWorld: AllowedCollisionMatrix excludes an otherwise-detected world collision") {
+  auto robot = load_two_link_arm();
+  auto world = cutil::make_ref<WorldConfig>();
+
+  Cuboid blocker;
+  blocker.name          = "blocker";
+  blocker.pose.position = cutil::Vec3f(0.3f, 0.0f, 0.3f);
+  blocker.dims           = cutil::Vec3f(0.5f, 0.5f, 0.5f);
+  world->add_obstacle(blocker);
+
+  RobotWorldConfig cfg{robot, world, false};
+  cfg.acm.disable_collision("link2", "blocker");
+  RobotWorld rw(cfg);
+  CHECK(rw.is_collision_free(JointState{{0.0f, 0.0f}, {}}));
+}
+
+TEST_CASE("RobotWorld: attached object does not collide with its own carrier link") {
+  auto robot = load_two_link_arm();
+  auto world = cutil::make_ref<WorldConfig>();
+
+  AttachedObject att;
+  att.name      = "held";
+  att.link_name = "link2";
+  att.center    = cutil::Vec3f(0.0f, 0.0f, 0.0f);
+  att.radius    = 0.04f;
+  world->add_attached_object(att);
+
+  RobotWorld rw(RobotWorldConfig{robot, world, false});
+  CHECK(rw.is_collision_free(JointState{{0.0f, 0.0f}, {}}));
+
+  // sanity: the same shape as a plain static obstacle at link2's position would be detected.
+  auto world2 = cutil::make_ref<WorldConfig>();
+  Sphere blocker;
+  blocker.name          = "blocker";
+  blocker.pose.position = cutil::Vec3f(0.3f, 0.0f, 0.3f);
+  blocker.radius         = 0.04f;
+  world2->add_obstacle(blocker);
+  RobotWorld rw2(RobotWorldConfig{robot, world2, false});
+  CHECK_FALSE(rw2.is_collision_free(JointState{{0.0f, 0.0f}, {}}));
+}
+
+TEST_CASE("RobotWorld: attached object follows its carrier link's FK, CPU matches GPU") {
+  auto robot = load_two_link_arm();
+  auto world = cutil::make_ref<WorldConfig>();
+
+  AttachedObject att;
+  att.name      = "held";
+  att.link_name = "link1";
+  att.center    = cutil::Vec3f(0.1f, 0.0f, 0.0f);
+  att.radius    = 0.02f;
+  world->add_attached_object(att);
+
+  Sphere blocker;
+  blocker.name          = "blocker";
+  blocker.pose.position = cutil::Vec3f(0.1f, 0.0f, 0.1f);
+  blocker.radius         = 0.02f;
+  world->add_obstacle(blocker);
+
+  RobotWorld cpu(RobotWorldConfig{robot, world, false});
+  RobotWorld gpu(RobotWorldConfig{robot, world, true});
+
+  JointState js_hit{{0.0f, 0.0f}, {}};
+  JointState js_miss{{1.5708f, 0.0f}, {}};
+
+  CHECK_FALSE(cpu.is_collision_free(js_hit));
+  CHECK_FALSE(gpu.is_collision_free(js_hit));
+  CHECK(cpu.is_collision_free(js_miss));
+  CHECK(gpu.is_collision_free(js_miss));
+}
+
 TEST_CASE("RobotWorld: adjacent-link spheres are excluded from self-collision") {
   auto robot = load_two_link_arm();
   auto world = cutil::make_ref<WorldConfig>();
