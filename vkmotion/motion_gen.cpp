@@ -430,14 +430,14 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       if(rrt.success) used_margin = rrt.margin;
     }
     // RRTは実行時間の分布が重い裾を持つ(数倍〜10倍遅い"運の悪い"シードがある)ので、短い制限時間で打ち切って別シードで再開する。
-    // 制限時間は試行ごとに1.5倍にして、本当に難しい問題でも総時間が(再開の無駄を含めても)2倍程度で済むようにする。
+    // 制限時間は20msから試行ごとに2倍にして、本当に難しい問題でも総時間が(再開の無駄を含めても)2倍程度で済むようにする(以前の3msからの1.5倍では、10〜20msかかる問題が途中で何度も打ち切られていた)。
     // 余裕(margin)は、木が伸びないときだけ探索の途中で縮める(fast_rrt_connect)。
     constexpr int kMaxRestarts = 64;
     for(int attempt = 0; attempt < kMaxRestarts && !rrt.success; attempt++) {
       FastRrtSettings st;
       st.margin      = margin;
       st.motion_step = step;
-      st.timeout_s   = std::min(remaining(), std::min(1.0, 0.003 * std::pow(1.5, attempt)));
+      st.timeout_s   = std::min(remaining(), std::min(1.0, 0.02 * std::pow(2.0, attempt)));
       if(threads == 1) {
         st.seed = seed + static_cast<uint64_t>(attempt) * 1000003ull;
         rrt     = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, st);

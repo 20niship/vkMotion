@@ -295,9 +295,10 @@ bool FastCollision::pack_gpu_robot(GpuRobotData& o) const {
   }
   // 自己衝突はリンク単位(pairs_はあるリンクペアのクラスタ全組み合わせ)なので、グループごとのビットマスクで渡す
   o.pairs.assign(groups_.size(), 0);
-  for(const auto& pr : pairs_) {
-    const int ga = group_of[static_cast<size_t>(pr.first)], gb = group_of[static_cast<size_t>(pr.second)];
+  for(size_t k = 0; k < pairs_.size(); k++) {
+    const int ga = group_of[static_cast<size_t>(pairs_[k].first)], gb = group_of[static_cast<size_t>(pairs_[k].second)];
     o.pairs[static_cast<size_t>(std::min(ga, gb))] |= 1 << std::max(ga, gb);
+    o.cluster_pairs.insert(o.cluster_pairs.end(), {pairs_[k].first, pairs_[k].second});
   }
   o.num_pairs = static_cast<int>(groups_.size());
   return o.num_steps <= 24;
@@ -326,8 +327,12 @@ void FastCollision::pack_gpu_world(GpuWorldData& o) const {
   for(size_t k : order) {
     const Box& b = boxes_[k];
     o.boxes.insert(o.boxes.end(), {b.c[0], b.c[1], b.c[2], mask_of(k)});
+    // rt行1のwは「world軸に揃った箱(回転が単位行列)」のフラグ。専用カーネルはその箱の距離計算から回転を省く
+    bool aligned = true;
+    for(int k = 0; k < 9; k++) aligned = aligned && std::fabs(b.rot[k] - ((k % 4 == 0) ? 1.0f : 0.0f)) < 1e-6f;
     o.boxes.insert(o.boxes.end(), {b.rot[0], b.rot[1], b.rot[2], min_dist(b)});
-    for(int r = 1; r < 3; r++) o.boxes.insert(o.boxes.end(), {b.rot[r * 3], b.rot[r * 3 + 1], b.rot[r * 3 + 2], 0.0f});
+    o.boxes.insert(o.boxes.end(), {b.rot[3], b.rot[4], b.rot[5], aligned ? 1.0f : 0.0f});
+    o.boxes.insert(o.boxes.end(), {b.rot[6], b.rot[7], b.rot[8], 0.0f});
     o.boxes.insert(o.boxes.end(), {b.half[0], b.half[1], b.half[2], 0.0f});
     o.boxes.insert(o.boxes.end(), {b.aabb_half[0], b.aabb_half[1], b.aabb_half[2], 0.0f});
   }

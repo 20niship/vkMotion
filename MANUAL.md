@@ -280,8 +280,12 @@ struct MotionGenConfig {
   bool use_vulkan = true;
   AllowedCollisionMatrix acm;
   float max_acceleration = 15.0f;   // 時間パラメタライズの関節加速度上限[rad/s^2](速度上限はURDFの<limit velocity>)
+  float search_step = 0.1f;         // 大域探索(RRT-Connect)の辺の検査間隔[m](球中心の移動量上界)。粗いほど速いが、最終経路は必ずcollision_stepで検証し直す
+  float collision_step = 0.05f;     // 経路の短縮・最終検証の辺の検査間隔[m]
   float collision_margin = 0.005f;  // 経路の内部点に持たせる安全余裕[m]
   int num_threads = 1;              // RRT-Connectを独立シードで並列起動する本数
+  bool gpu_search = false;          // 大域探索をGPU(Vulkan compute, shaders/rrt_gpu.comp)でも行う(実験的。CPU版の方が速い場合が多い)
+  float gpu_handoff_s = 0.001f;     // gpu_search時、まずCPUでこの秒数だけ試し、解けなければGPUに渡す(0ならGPU優先)
   int num_ik_goals = 3;             // 姿勢ゴール時にIKで集める衝突なし解の数(全部をゴール木の根にする)
   uint64_t seed = 0;                // 0: 非決定的
 
@@ -328,12 +332,12 @@ class MotionGen {
 
 1. `plan_single`は`IKSolver::solve_multiple`で衝突なしのIK解を`num_ik_goals`個集める(現在姿勢を最初のシードにして近い解を優先)。`plan_single_js`のゴールは1個。
 2. 直線補間が通れば終了。通れなければ`enable_graph_planner`が真のとき双方向RRT-Connect(`fast_rrt_connect`、ゴール木の根は全IK解、Halton列でサンプル)。
-   RRTは実行時間の裾が重いので、3msの制限時間から始めて試行ごとに1.5倍にしながら別シードで再開する(`timeout_seconds`が総時間の上限)。
-   安全余裕は`collision_margin`→1/4→0の順に2試行ずつ減らす(端点が障害物すれすれ・通路が狭い問題用)。`num_threads>1`なら最初に1スレッドで4ms試し、解けなければ独立シードで並列起動して最初の解を採る。
+   RRTは実行時間の裾が重いので、20msの制限時間から始めて試行ごとに2倍にしながら別シードで再開する(`timeout_seconds`が総時間の上限)。最近傍探索は8ノードずつのSIMD。
+   安全余裕は、片方の木が伸びないとき(端点が障害物すれすれ・通路が狭い問題)だけ探索の途中で`collision_margin`→1/4→0と縮める。辺の検査は`search_step`(粗い)で行い、短縮後の経路を`collision_step`(細かい)で検証し直す(通らなければ細かい間隔で探索し直す)。`num_threads>1`なら最初に1スレッドで4ms試し、解けなければ独立シードで並列起動して最初の解を採る。
 3. 経路を`fast_reduce`(貪欲に結べる最遠点へ飛ばす)→`fast_shortcut`(辺上のランダム2点を結び直す、`shortcut_iterations`回)で短縮し、制約があれば従来のconstraint repairを通す。
 4. `interpolated_times`は速度制限・加速度制限(区間ごとに一定加速度。加速度の予算は区間内0.6・角での速度ジャンプ0.4で、合算しても`max_acceleration`以内)を守る時間パラメタライズ。jerk制限は未対応。
 
-`success=true`の軌道の各辺は、辺ごとの検査点間隔(球中心の移動量上界0.05m)で衝突なしが確認されている。ただし辺上のすり抜けに対する数学的保証ではなく、`collision_margin`で内部点に余裕を持たせて別の検証器での食い込みを避けている(`bench/RESULTS.md`の「VAMP検証で衝突なし」参照)。
+`success=true`の軌道の各辺は、辺ごとの検査点間隔(球中心の移動量上界`collision_step`=0.05m)で衝突なしが確認されている。ただし辺上のすり抜けに対する数学的保証ではなく、`collision_margin`で内部点に余裕を持たせて別の検証器での食い込みを避けている(`bench/RESULTS.md`の「VAMP検証で衝突なし」参照)。
 
 ## 5.5 `CartesianPathPlanner` — 直線Cartesianパス(MoveIt2: computeCartesianPath)
 
@@ -433,3 +437,9 @@ class RrtConnectPlanner {
 | 5. MotionGen | フェーズ5 |
 
 MotionGenは本マニュアルの主目的(Pose指定プランニング)だが工数が大きいため、PLAN.md通りフェーズ4・5として段階実装する。シグネチャ自体は本マニュアルで先に確定させ、各フェーズの実装対象とする。
+
+
+### ロボット専用カーネル(実行時生成)
+`FastCollision`の構築時に、そのロボットのFK・境界球・自己衝突ペアをリテラルに展開した8レーンSIMDのC++を生成し、CMake時に見つけたコンパイラ(`-O2 -march=native -ffast-math`)で共有ライブラリにして読み込む
+(`vkmotion/gpu_codegen.cpp`の`generate_robot_cpp`/`load_cpu_kernel`)。結果は`~/.cache/vkmotion`(`VKMOTION_SHADER_CACHE`で変更)にキャッシュされ、初回だけ数秒かかる。
+コンパイラが使えない・失敗した場合は汎用実装に戻る。`VKMOTION_NO_CODEGEN=1`で無効化できる。GPU探索のシェーダも同じ方法でglslcから生成する。

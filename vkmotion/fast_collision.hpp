@@ -27,7 +27,8 @@ struct GpuRobotData {
   std::vector<float> cluster_bs;      // vec4 (xyz, radius)
   std::vector<int32_t> group_meta;    // 4 int: first_cluster, count, link, 0
   std::vector<float> group_bs;        // vec4
-  std::vector<int32_t> pairs;         // 2 int: cluster a, cluster b
+  std::vector<int32_t> pairs;         // グループ(リンク)ごとのビットマスク: bit h = グループgとh(>g)の自己衝突を見る
+  std::vector<int32_t> cluster_pairs;  // 2 int/組: 自己衝突を見るクラスタa, b(ロボット専用カーネルが静的に展開する)
 };
 struct GpuWorldData {
   int num_boxes = 0, num_balls = 0;

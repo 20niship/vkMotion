@@ -1,4 +1,5 @@
 #include "fast_planner.hpp"
+#include "simd8.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -70,40 +71,55 @@ class HaltonSampler {
   uint64_t index_;
 };
 
-// 浮動小数の木。ノードはdofを4の倍数へパディングして連続配置(最近傍探索がSIMD化される)。
+// 浮動小数の木。ノードはdofを4の倍数へパディングして連続配置(at()用)。最近傍探索用に、8ノードずつ「次元ごと」に並べ直した鏡も持つ
+// (8ノードの距離を1回のSIMD演算列で出す。ノード数が数千になる難しい問題では、線形探索が計画時間の3割を占めていた)。
 struct Tree {
   size_t dof;
   size_t stride;
   std::vector<float> q;
   std::vector<int> parent;
+  std::vector<v8f> blocks;  // blocks[(i/8)*dof + j][i%8] = ノードiのj次元目。端数レーンは大きな値で埋める
 
   explicit Tree(size_t dof_) : dof(dof_), stride((dof_ + 3) & ~size_t{3}) {}
   size_t size() const { return parent.size(); }
   const float* at(size_t i) const { return q.data() + i * stride; }
   int add(const float* v, int par) {
+    const size_t i = parent.size();
     q.resize(q.size() + stride, 0.0f);
     std::copy(v, v + dof, q.end() - static_cast<std::ptrdiff_t>(stride));
     parent.push_back(par);
-    return static_cast<int>(parent.size()) - 1;
+    if(i % 8 == 0) {
+      const v8f far = v8f{} + 1e18f;
+      for(size_t j = 0; j < dof; j++) blocks.push_back(far);
+    }
+    for(size_t j = 0; j < dof; j++) blocks[(i / 8) * dof + j][i % 8] = v[j];
+    return static_cast<int>(i);
   }
   int nearest(const float* v, float* out_d2) const {
-    int best = 0;
-    float bd = 1e30f;
     const size_t n = size();
-    for(size_t i = 0; i < n; i++) {
-      const float* p = at(i);
-      float d2       = 0.0f;
+    v8f bd         = v8f{} + 1e30f;
+    v8i bi         = v8i{};
+    for(size_t b = 0; b * 8 < n; b++) {
+      const v8f* blk = blocks.data() + b * dof;
+      v8f d2         = v8f{};
       for(size_t j = 0; j < dof; j++) {
-        float d = p[j] - v[j];
+        const v8f d = blk[j] - v[j];
         d2 += d * d;
       }
-      if(d2 < bd) {
-        bd   = d2;
-        best = static_cast<int>(i);
+      const v8i better = d2 < bd;
+      bd               = better ? d2 : bd;
+      bi               = better ? v8i{} + static_cast<int>(b) : bi;
+    }
+    float best = 1e30f;
+    int idx    = 0;
+    for(int lane = 0; lane < 8; lane++) {
+      if(bd[lane] < best) {
+        best = bd[lane];
+        idx  = bi[lane] * 8 + lane;
       }
     }
-    *out_d2 = bd;
-    return best;
+    *out_d2 = best;
+    return idx;
   }
 };
 

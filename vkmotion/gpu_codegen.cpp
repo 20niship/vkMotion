@@ -182,31 +182,20 @@ std::string generate_robot_glsl(const GpuRobotData& r) {
     }
     o << "    if(balls_hit()) return false;\n  }\n";
   }
-  // 自己衝突: リンクペアは静的
-  for(int g = 0; g < r.num_groups; g++) {
-    const int mask = r.pairs[static_cast<size_t>(g)];
-    for(int h = g + 1; h < r.num_groups; h++) {
-      if(!((mask >> h) & 1)) continue;
-      const float rr = r.group_bs[static_cast<size_t>(g * 4 + 3)] + r.group_bs[static_cast<size_t>(h * 4 + 3)];
-      o << "  { vec3 d = G" << g << " - G" << h << "; float rr = " << lit(rr) << " + 2.0 * MARGIN;\n    if(dot(d, d) <= rr * rr) {\n";
-      const int fa = r.group_meta[static_cast<size_t>(g * 4)], na = r.group_meta[static_cast<size_t>(g * 4 + 1)];
-      const int fb = r.group_meta[static_cast<size_t>(h * 4)], nb = r.group_meta[static_cast<size_t>(h * 4 + 1)];
-      for(int ca = fa; ca < fa + na; ca++)
-        for(int cb = fb; cb < fb + nb; cb++) {
-          const float rc = r.cluster_bs[static_cast<size_t>(ca * 4 + 3)] + r.cluster_bs[static_cast<size_t>(cb * 4 + 3)];
-          o << "      { vec3 e = C" << ca << " - C" << cb << "; float q = " << lit(rc) << " + 2.0 * MARGIN; if(dot(e, e) <= q * q) {\n";
-          const int sba = r.cluster_meta[static_cast<size_t>(ca * 4 + 1)], sca = r.cluster_meta[static_cast<size_t>(ca * 4 + 2)];
-          const int sbb = r.cluster_meta[static_cast<size_t>(cb * 4 + 1)], scb = r.cluster_meta[static_cast<size_t>(cb * 4 + 2)];
-          for(int i = sba; i < sba + sca; i++) {
-            o << "        { vec3 a = " << sphere_pos(ca, i) << ";\n";
-            for(int jj = sbb; jj < sbb + scb; jj++)
-              o << "          { vec3 b = " << sphere_pos(cb, jj) << "; vec3 w = a - b; float z = " << lit(sphere_r(i) + sphere_r(jj)) << " + 2.0 * MARGIN; if(dot(w, w) <= z * z) return false; }\n";
-            o << "        }\n";
-          }
-          o << "      } }\n";
-        }
-      o << "    } }\n";
+  // 自己衝突: クラスタペアは静的
+  for(size_t k = 0; k + 1 < r.cluster_pairs.size(); k += 2) {
+    const int ca = r.cluster_pairs[k], cb = r.cluster_pairs[k + 1];
+    const float rc = r.cluster_bs[static_cast<size_t>(ca * 4 + 3)] + r.cluster_bs[static_cast<size_t>(cb * 4 + 3)];
+    o << "  { vec3 e = C" << ca << " - C" << cb << "; float q = " << lit(rc) << " + 2.0 * MARGIN; if(dot(e, e) <= q * q) {\n";
+    const int sba = r.cluster_meta[static_cast<size_t>(ca * 4 + 1)], sca = r.cluster_meta[static_cast<size_t>(ca * 4 + 2)];
+    const int sbb = r.cluster_meta[static_cast<size_t>(cb * 4 + 1)], scb = r.cluster_meta[static_cast<size_t>(cb * 4 + 2)];
+    for(int i = sba; i < sba + sca; i++) {
+      o << "    { vec3 a = " << sphere_pos(ca, i) << ";\n";
+      for(int jj = sbb; jj < sbb + scb; jj++)
+        o << "      { vec3 b = " << sphere_pos(cb, jj) << "; vec3 w = a - b; float z = " << lit(sphere_r(i) + sphere_r(jj)) << " + 2.0 * MARGIN; if(dot(w, w) <= z * z) return false; }\n";
+      o << "    }\n";
     }
+    o << "  } }\n";
   }
   o << "  return true;\n}\n";
   return o.str();
@@ -275,10 +264,11 @@ std::string generate_robot_cpp(const GpuRobotData& r, size_t dof) {
   // 箱(pack_gpu_worldの24 float): center+allow, rt行0..2, half, aabb_half
   o << "inline v8f bsq(const float* b, v8f x, v8f y, v8f z) {\n"
        "  const v8f dx = x - b[0], dy = y - b[1], dz = z - b[2];\n"
-       "  const v8f lx = absf(b[4] * dx + b[5] * dy + b[6] * dz) - b[16];\n"
-       "  const v8f ly = absf(b[8] * dx + b[9] * dy + b[10] * dz) - b[17];\n"
-       "  const v8f lz = absf(b[12] * dx + b[13] * dy + b[14] * dz) - b[18];\n"
-       "  const v8f ox = maxz(lx), oy = maxz(ly), oz = maxz(lz);\n  return ox * ox + oy * oy + oz * oz;\n}\n";
+       "  v8f lx, ly, lz;\n"
+       "  if(b[11] != 0.0f) { lx = dx; ly = dy; lz = dz; }  // world軸に揃った箱(回転を省く)\n"
+       "  else { lx = b[4] * dx + b[5] * dy + b[6] * dz; ly = b[8] * dx + b[9] * dy + b[10] * dz; lz = b[12] * dx + b[13] * dy + b[14] * dz; }\n"
+       "  const v8f ax = absf(lx) - b[16], ay = absf(ly) - b[17], az = absf(lz) - b[18];\n"
+       "  const v8f ox = maxz(ax), oy = maxz(ay), oz = maxz(az);\n  return ox * ox + oy * oy + oz * oz;\n}\n";
   o << "inline uint32_t bits(float f) { uint32_t v; std::memcpy(&v, &f, 4); return v; }\n}\n";
   o << "extern \"C\" uint32_t vkm_mask8(const float* q, float margin, uint32_t required, const float* boxes, int nboxes, const float* balls, int nballs) {\n";
   for(size_t j = 0; j < dof; j++) {
@@ -361,6 +351,18 @@ std::string generate_robot_cpp(const GpuRobotData& r, size_t dof) {
   };
   auto sphere_r = [&](int i) { return r.spheres[static_cast<size_t>(i * 4 + 3)]; };
 
+  bool cstage2 = false;
+  if(std::getenv("VKM_CPU_STAGE")) {
+    const int cs = std::atoi(std::getenv("VKM_CPU_STAGE"));
+    if(cs == 2) cstage2 = true;
+    if(cs == 1) {
+      o << "  v8f acc = {};\n  for(int i = 0; i < " << r.num_spheres << "; i++) acc += SX[i] + SY[i] * 2.0f + SZ[i] * 3.0f;\n";
+      for(int c = 0; c < r.num_clusters; c++) o << "  acc += Cx" << c << " + Cy" << c << " + Cz" << c << ";\n";
+      for(int g = 0; g < r.num_groups; g++) o << "  acc += Gx" << g << " + Gy" << g << " + Gz" << g << ";\n";
+      o << "  return movemask(acc < 1e9f);\n}\n";
+      return o.str();
+    }
+  }
   o << "  uint32_t alive = 0xFFu;\n";
   o << "  const auto dead = [required](uint32_t a) { return required ? (a & required) != required : a == 0u; };\n";
   // 直方体: 箱はベースからの最短距離の昇順(B[7])。グループ境界球の「原点からの距離+半径」より遠い箱に当たったらそのグループの残りの箱は飛ばす(VAMPと同じ)
@@ -381,6 +383,7 @@ std::string generate_robot_cpp(const GpuRobotData& r, size_t dof) {
     }
     o << "      }\n    }\n  }\n";
   }
+  if(cstage2) { o << "  return alive;\n}\n"; return o.str(); }
   // 球障害物
   o << "  for(int b = 0; b < nballs; b++) {\n    const float* L = balls + 8 * b;\n    const uint32_t allow = bits(L[4]);\n";
   for(int c = 0; c < r.num_clusters; c++) {
@@ -392,33 +395,19 @@ std::string generate_robot_cpp(const GpuRobotData& r, size_t dof) {
     o << "      if(dead(alive)) return 0;\n    }\n";
   }
   o << "  }\n";
-  // 自己衝突(リンクペアは静的)
-  for(int g = 0; g < r.num_groups; g++) {
-    const int mask = r.pairs[static_cast<size_t>(g)];
-    for(int h = g + 1; h < r.num_groups; h++) {
-      if(!((mask >> h) & 1)) continue;
-      const float rr = r.group_bs[static_cast<size_t>(g * 4 + 3)] + r.group_bs[static_cast<size_t>(h * 4 + 3)];
-      o << "  { const v8f dx = Gx" << g << " - Gx" << h << ", dy = Gy" << g << " - Gy" << h << ", dz = Gz" << g << " - Gz" << h << "; const float rr = " << litf(rr) << " + 2.0f * margin;\n";
-      o << "    if(movemask(dx * dx + dy * dy + dz * dz <= rr * rr) & alive) {\n";
-      const int fa = r.group_meta[static_cast<size_t>(g * 4)], na = r.group_meta[static_cast<size_t>(g * 4 + 1)];
-      const int fb = r.group_meta[static_cast<size_t>(h * 4)], nb = r.group_meta[static_cast<size_t>(h * 4 + 1)];
-      for(int ca = fa; ca < fa + na; ca++)
-        for(int cb = fb; cb < fb + nb; cb++) {
-          const float rc = r.cluster_bs[static_cast<size_t>(ca * 4 + 3)] + r.cluster_bs[static_cast<size_t>(cb * 4 + 3)];
-          o << "      { const v8f ex = Cx" << ca << " - Cx" << cb << ", ey = Cy" << ca << " - Cy" << cb << ", ez = Cz" << ca << " - Cz" << cb << "; const float q = " << litf(rc) << " + 2.0f * margin;\n";
-          o << "        if(movemask(ex * ex + ey * ey + ez * ez <= q * q) & alive) {\n";
-          const int sba = r.cluster_meta[static_cast<size_t>(ca * 4 + 1)], sca = r.cluster_meta[static_cast<size_t>(ca * 4 + 2)];
-          const int sbb = r.cluster_meta[static_cast<size_t>(cb * 4 + 1)], scb = r.cluster_meta[static_cast<size_t>(cb * 4 + 2)];
-          for(int i = sba; i < sba + sca; i++) {
-            o << "          { " << sphere_decl(ca, i, "a");
-            for(int jj = sbb; jj < sbb + scb; jj++)
-              o << "            { " << sphere_decl(cb, jj, "b") << "const v8f wx = ax - bx, wy = ay - by, wz = az - bz; const float z2 = " << litf(sphere_r(i) + sphere_r(jj)) << " + 2.0f * margin; alive &= ~movemask(wx * wx + wy * wy + wz * wz <= z2 * z2); }\n";
-            o << "          }\n";
-          }
-          o << "          if(dead(alive)) return 0;\n        } }\n";
-        }
-      o << "    } }\n";
-    }
+  // 自己衝突: クラスタペアは静的
+  for(size_t k = 0; k + 1 < r.cluster_pairs.size(); k += 2) {
+    const int ca = r.cluster_pairs[k], cb = r.cluster_pairs[k + 1];
+    const float rc = r.cluster_bs[static_cast<size_t>(ca * 4 + 3)] + r.cluster_bs[static_cast<size_t>(cb * 4 + 3)];
+    o << "  { const v8f ex = Cx" << ca << " - Cx" << cb << ", ey = Cy" << ca << " - Cy" << cb << ", ez = Cz" << ca << " - Cz" << cb << "; const float q = " << litf(rc) << " + 2.0f * margin;\n";
+    o << "    if(movemask(ex * ex + ey * ey + ez * ez <= q * q) & alive) {\n";
+    const int sba = r.cluster_meta[static_cast<size_t>(ca * 4 + 1)], sca = r.cluster_meta[static_cast<size_t>(ca * 4 + 2)];
+    const int sbb = r.cluster_meta[static_cast<size_t>(cb * 4 + 1)], scb = r.cluster_meta[static_cast<size_t>(cb * 4 + 2)];
+    for(int i = sba; i < sba + sca; i++)
+      for(int jj = sbb; jj < sbb + scb; jj++)
+        o << "      { const v8f wx = SX[" << i << "] - SX[" << jj << "], wy = SY[" << i << "] - SY[" << jj << "], wz = SZ[" << i << "] - SZ[" << jj << "]; const float z2 = " << litf(sphere_r(i) + sphere_r(jj))
+          << " + 2.0f * margin; alive &= ~movemask(wx * wx + wy * wy + wz * wz <= z2 * z2); }\n";
+    o << "      if(dead(alive)) return 0;\n    } }\n";
   }
   o << "  return alive;\n}\n";
   return o.str();
