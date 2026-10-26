@@ -424,7 +424,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       FastRrtSettings quick;
       quick.margin      = margin;
       quick.motion_step = step;
-      quick.timeout_s   = 0.004;
+      quick.timeout_s   = 0.0005;
       quick.seed        = seed ^ 0xA5A5A5A5ull;
       rrt               = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, quick);
       if(rrt.success) used_margin = rrt.margin;

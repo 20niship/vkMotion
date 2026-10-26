@@ -204,7 +204,7 @@ def section_before_after(now, base):
 
 NOTES = """
 - **VAMPとの比較(正直なところ)**: 中央値はvkMotion CPUが0.27ms、VAMPが0.34msで、1.3倍ほど速いが「数倍」ではない。簡単な問題が多い`box`/`table_*`では約1.5〜2倍速い。
-  裾は依然としてVAMPが良い(VAMP p95≈0.9ms/p99≈1.6ms、vkMotion CPUはp95≈3.3ms/p99≈5ms)。難しいシーン`cage`は、vkMotion CPUの中央値が約1.9ms・上限が約4.2msで、VAMPは0.7ms・上限2.3ms。
+  裾は依然としてVAMPが良い(VAMP p95≈0.9ms/p99≈1.6ms、vkMotion CPU 1スレッドはp95≈3.4ms/p99≈5ms、8スレッドで独立シードを競わせるとp95≈2ms/p99≈5ms)。難しいシーン`cage`は、vkMotion CPUの中央値が約1.9ms・上限が約4.2msで、VAMPは0.7ms・上限2.3ms。
   難しいケースの上限は、以前の20ms近くから、関節ゴールで最大約11ms・姿勢ゴールで約10msまで縮んだが、`cage`ではVAMPの1.5〜2倍遅い。
   VAMPの時間は`time_ms`=1回目の実行(plan+simplify)で、`time_ms_median3`は3回の中央値(以前はこちらを使っていたため裾が隠れていた)。
 - **今回効いたこと**: (1) 最近傍探索を8ノードずつのSIMD(次元ごとに並べた鏡)にした(ノード数が数千になる難しい問題で計画時間の3割を占めていた)、
