@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "allowed_collision_matrix.hpp"
 #include "robot_config.hpp"
 #include "types.hpp"
 #include "world_config.hpp"
@@ -25,13 +26,14 @@ struct RrtConnectResult {
 // 双方向木のRRT-Connect。局所勾配降下のrepairだけでは迂回できない大域的な障害物配置向けのフォールバック。
 class RrtConnectPlanner {
  public:
-  explicit RrtConnectPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan = true);
+  explicit RrtConnectPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan = true, AllowedCollisionMatrix acm = {});
   RrtConnectResult plan(const JointState& start, const JointState& goal, const RrtConnectConfig& config = {});
 
  private:
   cutil::Ref<RobotConfig> robot_config_;
   cutil::Ref<WorldConfig> world_config_;
   bool use_vulkan_;
+  AllowedCollisionMatrix acm_;
 };
 
 }  // namespace vkmotion

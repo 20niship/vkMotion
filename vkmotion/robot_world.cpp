@@ -3,11 +3,16 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <thread>
 
+#include "fast_collision.hpp"
+#include "vk_rrt.hpp"
 #include "sphere_collision.hpp"
 #include "vk_collision.hpp"
 #include "vk_context.hpp"
 #include "vk_repair.hpp"
+#include "vk_validate.hpp"
 
 namespace vkmotion {
 
@@ -126,7 +131,70 @@ std::vector<float> RobotWorld::get_self_collision_distance(const JointState& joi
   return distances;
 }
 
+void RobotWorld::warmup() const {
+  const FastCollision* fc = fast_collision();
+  if(fc && config_.use_vulkan && fc->gpu_compatible()) {
+    // 閾値ちょうどのバッチを1回流してパイプライン作成と世界のアップロードまで済ませる
+    std::vector<JointState> dummy(kGpuBatchThreshold, JointState{std::vector<float>(config_.robot_config->dof(), 0.0f), {}});
+    is_collision_free_batch(dummy);
+  }
+  if(gpu_rrt_available()) {
+    // GPU探索のパイプライン(ロボット専用シェーダのコンパイルを含む)と世界のアップロードまで済ませる。解けるかどうかは問わない。
+    GpuRrtSettings gs;
+    gs.max_submits = 1;
+    gs.rounds_per_submit = 2;
+    std::vector<std::vector<float>> path;
+    const size_t dof = config_.robot_config->dof();
+    gpu_rrt_connect(std::vector<float>(dof, 0.0f), {std::vector<float>(dof, 0.1f)}, gs, path);
+  }
+}
+
+bool RobotWorld::gpu_rrt_available() const {
+  if(!config_.use_vulkan || vk_rrt_failed_) return false;
+  const FastCollision* fc = fast_collision();
+  return fc && fc->gpu_compatible() && fc->dof() <= VkRrtPipeline::kMaxDof;
+}
+
+bool RobotWorld::gpu_rrt_connect(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings, std::vector<std::vector<float>>& path, float* margin_used) const {
+  if(!gpu_rrt_available()) return false;
+  const FastCollision* fc = fast_collision();
+  try {
+    std::lock_guard<std::mutex> lock(fast_mutex_);
+    if(!vk_rrt_) {
+      GpuRobotData rd;
+      if(!fc->pack_gpu_robot(rd)) throw std::runtime_error("robot exceeds GPU limits");
+      if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
+      vk_rrt_         = std::make_unique<VkRrtPipeline>(*vk_ctx_, rd, fc->joint_reach(), config_.robot_config->joint_position_limits_lower(), config_.robot_config->joint_position_limits_upper());
+      vk_rrt_version_ = ~uint64_t{0};
+    }
+    if(vk_rrt_version_ != config_.world_config->version()) {
+      GpuWorldData wd;
+      fc->pack_gpu_world(wd);
+      vk_rrt_->set_world(wd);
+      vk_rrt_version_ = config_.world_config->version();
+    }
+    return vk_rrt_->plan(start, goals, settings, path, margin_used);
+  } catch(const std::exception&) {
+    vk_rrt_failed_ = true;
+    return false;
+  }
+}
+
+const FastCollision* RobotWorld::fast_collision() const {
+  std::lock_guard<std::mutex> lock(fast_mutex_);
+  const uint64_t version = config_.world_config->version();
+  if(!fast_) fast_ = std::make_unique<FastCollision>(*config_.robot_config, config_.acm);
+  if(fast_version_ != version) {
+    fast_supported_ = fast_->set_world(*config_.world_config);
+    fast_version_   = version;
+  }
+  return fast_supported_ ? fast_.get() : nullptr;
+}
+
 bool RobotWorld::is_collision_free(const JointState& joint_state) const {
+  if(const FastCollision* fc = fast_collision()) {
+    if(joint_state.position.size() >= fc->dof()) return fc->is_free(joint_state.position.data());
+  }
   for(float d : get_collision_distance(joint_state))
     if(d <= 0.0f) return false;
   for(float d : get_self_collision_distance(joint_state))
@@ -238,6 +306,37 @@ std::vector<bool> RobotWorld::repair_waypoints(std::vector<std::vector<float>*>&
 }
 
 std::vector<bool> RobotWorld::is_collision_free_batch(const std::vector<JointState>& joint_states) const {
+  if(const FastCollision* fc = fast_collision()) {
+    const size_t dof = fc->dof();
+    std::vector<float> flat(joint_states.size() * dof);
+    for(size_t i = 0; i < joint_states.size(); i++) std::copy(joint_states[i].position.begin(), joint_states[i].position.begin() + dof, flat.begin() + i * dof);
+    std::vector<uint8_t> ok(joint_states.size());
+    if(config_.use_vulkan && joint_states.size() >= kGpuBatchThreshold && fc->gpu_compatible() && !vk_validate_failed_) {
+      try {
+        std::lock_guard<std::mutex> lock(fast_mutex_);
+        if(!vk_validate_) {
+          GpuRobotData rd;
+          if(!fc->pack_gpu_robot(rd)) throw std::runtime_error("robot exceeds GPU validate limits");
+          if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
+          vk_validate_ = std::make_unique<VkValidatePipeline>(*vk_ctx_, rd);
+          vk_validate_version_ = ~uint64_t{0};
+        }
+        if(vk_validate_version_ != config_.world_config->version()) {
+          GpuWorldData wd;
+          fc->pack_gpu_world(wd);
+          vk_validate_->set_world(wd);
+          vk_validate_version_ = config_.world_config->version();
+        }
+        vk_validate_->validate(flat.data(), joint_states.size(), 0.0f, ok.data());
+        return std::vector<bool>(ok.begin(), ok.end());
+      } catch(const std::exception&) {
+        vk_validate_failed_ = true;  // Vulkanが使えない/ロボットが対応外 -> 以後CPUのみ
+      }
+    }
+    int threads = config_.num_threads > 0 ? config_.num_threads : static_cast<int>(std::min(8u, std::max(1u, std::thread::hardware_concurrency())));
+    fc->is_free_batch(flat.data(), joint_states.size(), ok.data(), threads);
+    return std::vector<bool>(ok.begin(), ok.end());
+  }
   if(!config_.use_vulkan) {
     std::vector<bool> results;
     results.reserve(joint_states.size());

@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_control_flow_attributes : enable
+
+// 1スレッド=1コンフィグ。FK→球の世界座標→(直方体/球)障害物との衝突→自己衝突まで1 dispatchで判定し、衝突なしなら1を書く。
+// vkmotion/fast_collision.cpp の free_scalar / mask8_impl と同じ判定(球半径+margin <= 距離 で衝突)。変更時は両方そろえること。
+// 直方体の距離は「外側距離^2 <= (r+margin)^2」で判定する(内部はmax(q,0)=0なので常に衝突になる)。
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Configs { float cfg[]; };
+layout(std430, binding = 11) writeonly buffer Out { uint out_free[]; };
+
+layout(push_constant) uniform PushConstants {
+  uint num_configs;
+  uint dof;
+  uint num_steps;
+  uint num_spheres;
+  uint num_clusters;
+  uint num_groups;
+  uint num_pairs;
+  uint num_boxes;
+  uint num_balls;
+  uint num_links;
+  float margin;
+  uint pad0;
+}
+pc;
+
+#define ROBOT_SHARED
+#include "include/robot_collision_common.glsl"
+
+void main() {
+  load_robot_shared(gl_LocalInvocationID.x, 64u);
+  barrier();
+  uint idx = gl_GlobalInvocationID.x;
+  if(idx >= pc.num_configs) return;
+  for(uint j = 0; j < pc.dof; j++) Q[j] = cfg[idx * pc.dof + j];
+  out_free[idx] = config_free() ? 1u : 0u;
+}

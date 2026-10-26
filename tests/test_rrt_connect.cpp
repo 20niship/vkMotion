@@ -66,21 +66,24 @@ TEST_CASE("RrtConnectPlanner: ur5e finds a path around an obstacle on its own") 
 }
 
 TEST_CASE("MotionGen: enable_graph_planner reaches the RRT-Connect fallback when local search is disabled") {
-  auto robot = load_two_link_arm();
+  auto robot = load_ur5e();
   auto world = cutil::make_ref<WorldConfig>();
 
-  // 直線補間上のwaypointを完全に塞ぎ、direct roundを確実に失敗させる。
-  JointState start{{0.0f, 0.0f}, {}};
-  JointState goal{{1.0f, 0.0f}, {}};
+  // 直線経路を塞いで、直線(ローカル探索)だけでは解けないようにする。
+  JointState start{{0.0f, -1.57f, 1.57f, -1.57f, -1.57f, 0.0f}, {}};
+  JointState goal{{1.5f, -1.0f, 1.0f, -1.0f, -1.0f, 0.5f}, {}};
+  JointState mid;
+  mid.position.resize(start.position.size());
+  for(size_t j = 0; j < mid.position.size(); j++) mid.position[j] = 0.5f * (start.position[j] + goal.position[j]);
   Sphere blocker;
   blocker.name          = "blocker";
-  blocker.pose.position = cutil::Vec3f(0.3f * std::cos(0.5f), 0.3f * std::sin(0.5f), 0.3f);
-  blocker.radius         = 0.03f;
+  blocker.pose.position = ee_position(*robot, mid);
+  blocker.radius         = 0.2f;
   world->add_obstacle(blocker);
 
   MotionGenConfig cfg = MotionGenConfig::load_from_robot_config(robot, world);
 
-  // num_trajopt_seeds=1・max_attempts=1で経由点によるランダム探索を無効化する。
+  // num_trajopt_seeds=1・max_attempts=1・graph planner無効 = 直線のみ
   MotionGenPlanConfig no_fallback_cfg;
   no_fallback_cfg.enable_graph_planner = false;
   no_fallback_cfg.max_attempts          = 1;
@@ -88,17 +91,16 @@ TEST_CASE("MotionGen: enable_graph_planner reaches the RRT-Connect fallback when
   cfg_single_seed.num_trajopt_seeds     = 1;
   MotionGen gen_no_fallback(cfg_single_seed);
   MotionGenResult local_only = gen_no_fallback.plan_single_js(start, goal, no_fallback_cfg);
+  CHECK_FALSE(local_only.success);
 
-  // フォールバック有効ならlocal searchの結果に関わらず最終的に成功すること。
+  // フォールバック有効なら最終的に成功すること。
   MotionGen gen_with_fallback(cfg_single_seed);
   MotionGenPlanConfig fallback_cfg;
   fallback_cfg.max_attempts     = 1;
   MotionGenResult with_fallback = gen_with_fallback.plan_single_js(start, goal, fallback_cfg);
   REQUIRE(with_fallback.success);
+  CHECK(with_fallback.status == "success (RRT-Connect fallback)");
 
   RobotWorld rw(RobotWorldConfig{robot, world, false});
   for(const auto& js : with_fallback.trajectory) CHECK(rw.is_collision_free(js));
-
-  // local_onlyが失敗していた場合のみ、フォールバックが実際にRRT-Connect経由で成功したことを確認する。
-  if(!local_only.success) CHECK(with_fallback.status == "success (RRT-Connect fallback)");
 }

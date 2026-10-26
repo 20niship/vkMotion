@@ -12,13 +12,14 @@ class VkContext;
 // Host-visible + host-coherent storage buffer (VMA-backed, persistently mapped).
 class VkStorageBuffer {
  public:
-  VkStorageBuffer(VkContext& ctx, size_t size_bytes);
+  // prefer_device=true: 可能ならGPUのローカルメモリ(BAR経由でホストから書ける領域)に置く。GPUが頻繁にアトミック/読み書きする小さなバッファ用。
+  VkStorageBuffer(VkContext& ctx, size_t size_bytes, bool prefer_device = false);
   ~VkStorageBuffer();
   VkStorageBuffer(const VkStorageBuffer&)            = delete;
   VkStorageBuffer& operator=(const VkStorageBuffer&) = delete;
 
   void upload(const void* data, size_t size_bytes);
-  void download(void* out, size_t size_bytes) const;
+  void download(void* out, size_t size_bytes, size_t offset_bytes = 0) const;
 
   VkBuffer handle() const { return buffer_; }
   VkDescriptorBufferInfo descriptor_info() const;

@@ -7,3 +7,7 @@ examples/**/*.gif
 examples/**/*.mp4
 examples/__pycache__/
 __pycache__/
+bench/.venv/
+bench/.deps/
+bench/data/
+bench/results/

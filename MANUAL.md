@@ -154,7 +154,9 @@ namespace vkmotion {
 struct RobotWorldConfig {
   cutil::Ref<RobotConfig> robot_config;
   cutil::Ref<WorldConfig> world_config;
-  bool use_vulkan = true;  // falseならCPUリファレンス実装のみで計算
+  bool use_vulkan = true;  // trueなら大きいバッチ(kGpuBatchThreshold=4096件以上)をGPUで判定。falseでもCPU SIMDで高速に動く
+  AllowedCollisionMatrix acm;
+  int num_threads = 0;     // バッチ判定のCPUスレッド数。0=自動(最大8)
 };
 
 class RobotWorld {
@@ -169,14 +171,32 @@ class RobotWorld {
 
   bool is_collision_free(const JointState& joint_state) const;
 
-  // バッチ版(多数の関節角度を一括でVulkan computeに投げる)
+  // バッチ版。use_vulkan=trueかつ4096件以上ならGPU(robot_validate.comp: FK→障害物→自己衝突を1 dispatch)、それ未満はCPU SIMD+マルチスレッド。
   std::vector<bool> is_collision_free_batch(const std::vector<JointState>& joint_states) const;
+
+  // 初回呼び出しのレイテンシ(障害物のコンパイル・Vulkanパイプライン作成)を前倒しする
+  void warmup() const;
+
+  // コンパイル済みの高速衝突判定(下記)。障害物がcuboid/sphere/cylinder/capsule/planeのみでattached objectが無いとき有効、それ以外はnullptr(参照実装で判定)
+  const FastCollision* fast_collision() const;
 };
 
 }  // namespace vkmotion
 ```
 
 対応テスト: `tests/test_collision_cpu.cpp`(`use_vulkan=false`)、`tests/test_collision_vulkan.cpp`(`use_vulkan=true`、CPU版と出力一致を確認)、`tests/test_collision_gt.cpp`(Python cuRoboで生成したハードコードGTと比較)。
+
+### 3.1 高速パス(`FastCollision` / `CompiledKinematics`)
+
+`vkmotion/fast_collision.hpp`, `vkmotion/fast_kinematics.hpp`
+
+`RobotWorld::is_collision_free`/`is_collision_free_batch`とプランナー(`MotionGen`/`RrtConnectPlanner`/`IKSolver`)は、ロード時にコンパイルした以下の高速実装を使う。`get_collision_distance`/`get_self_collision_distance`(符号付き距離)は従来どおり参照実装(`sphere_collision.cpp`)のまま。
+
+- `CompiledKinematics`: URDFをトポロジカル順のステップ列にコンパイルしたFK/解析ヤコビアン(hash mapも確保も無し)。`RobotConfig::forward_kinematics`もこれで計算する。
+- `FastCollision`: 衝突球を空間クラスタ(最大4球)に分け、リンク→クラスタ→球の3段の境界球で足切りする。8コンフィグを同時に判定するSIMD版(`free_mask8`、AVX2想定のGCC vector extension)、動作検証`motion_free`(Lipschitz上界から検査点数を決め、粗い分割から検査して早期棄却)、安全余裕つき判定を持つ。
+- GPU: `shaders/robot_validate.comp`は1スレッド1コンフィグでFK・世界・自己衝突を判定する。ロボット記述は構築時、世界は変更時にだけアップロードする。
+- 検査の精度: 直方体/球/円柱/カプセル/平面は参照実装と同じ判定(符号付き距離<=0が衝突)。`tests/test_fast_collision.cpp`でランダムな世界・コンフィグについて参照実装・SIMD・GPUの一致を確認している。
+- ビルド: `VKMOTION_NATIVE_ARCH`(既定ON)で`-march=native`を付ける。配布用バイナリを作るならOFFにする(その場合もSIMDコードは動くが遅くなる)。
 
 ## 3.5 `AllowedCollisionMatrix` / `AttachedObject` — MoveIt2のACM/attached object相当
 
@@ -217,7 +237,9 @@ namespace vkmotion {
 struct IKSolverConfig {
   cutil::Ref<RobotConfig> robot_config;
   cutil::Ref<WorldConfig> world_config;  // 衝突回避IKをやる場合に使用、nullptrなら衝突無視
-  int num_seeds = 32;  // 並列に試す初期値の数
+  int num_seeds = 512;  // 試すランダム初期値数の上限(収束かつ衝突なしの解が見つかった時点で打ち切る)
+  AllowedCollisionMatrix acm;
+  uint64_t seed = 0;    // 0: 非決定的、それ以外: 再現可能な乱数列
 };
 
 class IKSolver {
@@ -228,14 +250,19 @@ class IKSolver {
   std::optional<JointState> solve_single(const Pose& goal_pose,
                                           const std::optional<JointState>& seed = std::nullopt);
 
-  // 複数ゴールを並列に解く(Vulkan compute: num_seeds x batch_size を1 dispatch)
+  // 複数ゴールをそれぞれ解く(各ゴールについて衝突なしの解が見つかるまで最大num_seeds個のシードを試す)
   std::vector<std::optional<JointState>> solve_batch(const std::vector<Pose>& goal_poses);
+
+  // 異なる(各関節0.05rad以上離れた)衝突なしの解を最大max_solutions個集める。first_seedを渡すと最初の試行がそこから始まる。
+  std::vector<JointState> solve_multiple(const Pose& goal_pose, int max_solutions, int max_seeds,
+                                         const std::optional<JointState>& first_seed = std::nullopt);
 };
 
 }  // namespace vkmotion
 ```
 
-- CPUリファレンス実装(`solve_single`の内部)はヤコビアンの減衰最小二乗法(DLS)で解く。ヤコビアンは`6×dof`の可変サイズ行列なので cutil の固定長 `Mat4f` ではなく **Eigen** (`Eigen::MatrixXd` + `Eigen::JacobiSVD`等) を使う。Vulkan compute版は同じDLS更新式をGLSLで並列化(シード毎に1スレッド)したもの。
+- 解法はLevenberg-Marquardt(解析ヤコビアン`CompiledKinematics::jacobian` + `Eigen`の6x6 LDLT)。損失が下がらなければ減衰を上げて巻き戻す。収束条件は位置1e-4m・姿勢5e-4rad。末端リンクは`link_names().back()`。
+- 衝突回避は「運動学的IKの解を衝突判定で棄却して別シードで再試行」する方式(cuRoboのように衝突コストを最適化に入れるのではない)。そのため狭所のゴールでは多数のシードが必要になる(MotionBenchMakerの699問で`num_seeds=512`なら99.9%以上)。
 
 ## 5. `MotionGen` — Pose指定プランニング(本題)
 
@@ -249,17 +276,24 @@ namespace vkmotion {
 struct MotionGenConfig {
   cutil::Ref<RobotConfig> robot_config;
   cutil::Ref<WorldConfig> world_config;
-  int num_trajopt_seeds = 12;  // 並列に試す初期シード数(IK解候補+乱数)
+  int num_trajopt_seeds = 12;  // 旧経路(障害物にconvex/SDF/attachedを含む場合)で並列に試す初期シード数。IKのシード数は num_trajopt_seeds * 48
   bool use_vulkan = true;
+  AllowedCollisionMatrix acm;
+  float max_acceleration = 15.0f;   // 時間パラメタライズの関節加速度上限[rad/s^2](速度上限はURDFの<limit velocity>)
+  float collision_margin = 0.005f;  // 経路の内部点に持たせる安全余裕[m]
+  int num_threads = 1;              // RRT-Connectを独立シードで並列起動する本数
+  int num_ik_goals = 3;             // 姿勢ゴール時にIKで集める衝突なし解の数(全部をゴール木の根にする)
+  uint64_t seed = 0;                // 0: 非決定的
 
   static MotionGenConfig load_from_robot_config(cutil::Ref<RobotConfig> robot_config,
                                                  cutil::Ref<WorldConfig> world_config);
 };
 
 struct MotionGenPlanConfig {
-  int max_attempts = 10;
+  int max_attempts = 10;            // 旧経路のみ。高速パスは再開回数でなくtimeout_secondsで打ち切る
   bool enable_graph_planner = true;   // IK+TrajOptが失敗した場合に幾何プランナーへフォールバック(stretch, 未実装時は無視)
   float timeout_seconds = 5.0f;
+  int shortcut_iterations = 60;
 };
 
 struct MotionGenResult {
@@ -290,12 +324,16 @@ class MotionGen {
 }  // namespace vkmotion
 ```
 
-内部処理フロー(cuRobo同様):
+内部処理フロー(障害物が高速パス対応の形状のとき。convex/SDF/attached objectを含む場合は従来の直線補間+局所repair+RRTの経路に自動で戻る):
 
-1. `goal_pose` を `IKSolver` で複数解に展開(`num_trajopt_seeds`個の初期値)
-2. 各初期値から軌道最適化(勾配降下 / L-BFGS相当 + `RobotWorld`の衝突距離をコスト項として使用)を並列実行
-3. 衝突なし・関節limit内で最初に収束した軌道を採用、`MotionGenResult`に詰めて返す
-4. 全シード失敗なら `enable_graph_planner` が真なら幾何プランナーにフォールバック(未実装の間は `success=false`)
+1. `plan_single`は`IKSolver::solve_multiple`で衝突なしのIK解を`num_ik_goals`個集める(現在姿勢を最初のシードにして近い解を優先)。`plan_single_js`のゴールは1個。
+2. 直線補間が通れば終了。通れなければ`enable_graph_planner`が真のとき双方向RRT-Connect(`fast_rrt_connect`、ゴール木の根は全IK解、Halton列でサンプル)。
+   RRTは実行時間の裾が重いので、3msの制限時間から始めて試行ごとに1.5倍にしながら別シードで再開する(`timeout_seconds`が総時間の上限)。
+   安全余裕は`collision_margin`→1/4→0の順に2試行ずつ減らす(端点が障害物すれすれ・通路が狭い問題用)。`num_threads>1`なら最初に1スレッドで4ms試し、解けなければ独立シードで並列起動して最初の解を採る。
+3. 経路を`fast_reduce`(貪欲に結べる最遠点へ飛ばす)→`fast_shortcut`(辺上のランダム2点を結び直す、`shortcut_iterations`回)で短縮し、制約があれば従来のconstraint repairを通す。
+4. `interpolated_times`は速度制限・加速度制限(区間ごとに一定加速度。加速度の予算は区間内0.6・角での速度ジャンプ0.4で、合算しても`max_acceleration`以内)を守る時間パラメタライズ。jerk制限は未対応。
+
+`success=true`の軌道の各辺は、辺ごとの検査点間隔(球中心の移動量上界0.05m)で衝突なしが確認されている。ただし辺上のすり抜けに対する数学的保証ではなく、`collision_margin`で内部点に余裕を持たせて別の検証器での食い込みを避けている(`bench/RESULTS.md`の「VAMP検証で衝突なし」参照)。
 
 ## 5.5 `CartesianPathPlanner` — 直線Cartesianパス(MoveIt2: computeCartesianPath)
 
@@ -365,9 +403,9 @@ class ConstraintSet {
 
 ```cpp
 struct RrtConnectConfig {
-  int max_iterations = 2000;
-  float step_size = 0.1f;
-  int max_samples_per_batch = 16;  // ランダムサンプルをまとめて1回のバッチdispatchで衝突チェックする数
+  int max_iterations = 2000;       // 旧経路(高速パス非対応の世界)のみ使用
+  float step_size = 0.1f;          // 同上
+  int max_samples_per_batch = 16;  // 同上
 };
 struct RrtConnectResult {
   bool success = false;
@@ -381,7 +419,7 @@ class RrtConnectPlanner {
 };
 ```
 
-`MotionGenPlanConfig::enable_graph_planner`(既定`true`)が有効な場合、`MotionGen::plan_single_js`は直線補間+局所repairの全ラウンドが失敗した後、最後の手段として`RrtConnectPlanner`を1回呼ぶ。見つかった粗い経路にはshortcut平滑化・制約repair・時間パラメタライズが通常通り適用される。
+高速パス対応の世界では`fast_rrt_connect`(`vkmotion/fast_planner.hpp`、VAMPのRRTCと同じ構成: 範囲1.0radのextend/connect、SIMDで8点同時の辺検査)を直接呼ぶ。それ以外の世界では従来の1サンプルずつバッチ判定する実装にフォールバックする。`MotionGen`は上記のとおり高速パスでは直線→RRT-Connectの順に試し、`MotionGenPlanConfig::enable_graph_planner=false`なら直線だけを試す。
 
 ## 6. 実装フェーズとの対応
 

@@ -2,6 +2,7 @@
 #include "vk_context.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -82,19 +83,36 @@ VkContext::VkContext() {
   std::vector<VkPhysicalDevice> devices(device_count);
   vkEnumeratePhysicalDevices(instance_, &device_count, devices.data());
 
-  for(VkPhysicalDevice candidate : devices) {
+  // computeキューを持つデバイスのうち、discrete GPU > integrated > それ以外(lavapipeなどのCPU実装)の順に選ぶ。
+  // 環境変数 VKMOTION_DEVICE_INDEX=<n> で明示指定もできる。
+  auto rank = [](VkPhysicalDevice d) {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(d, &props);
+    switch(props.deviceType) {
+      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
+      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
+      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
+      default: return 0;
+    }
+  };
+  const char* forced = std::getenv("VKMOTION_DEVICE_INDEX");
+  int best_rank       = -1;
+  for(size_t di = 0; di < devices.size(); di++) {
+    VkPhysicalDevice candidate = devices[di];
     uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(candidate, &family_count, nullptr);
     std::vector<VkQueueFamilyProperties> families(family_count);
     vkGetPhysicalDeviceQueueFamilyProperties(candidate, &family_count, families.data());
     for(uint32_t i = 0; i < family_count; i++) {
-      if(families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-        physical_device_       = candidate;
-        compute_queue_family_  = i;
-        break;
+      if(!(families[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) continue;
+      int r = (forced && static_cast<size_t>(std::atoi(forced)) == di) ? 100 : rank(candidate);
+      if(r > best_rank) {
+        best_rank             = r;
+        physical_device_      = candidate;
+        compute_queue_family_ = i;
       }
+      break;
     }
-    if(physical_device_ != VK_NULL_HANDLE) break;
   }
   if(physical_device_ == VK_NULL_HANDLE) throw std::runtime_error("no Vulkan device with a compute queue found");
 

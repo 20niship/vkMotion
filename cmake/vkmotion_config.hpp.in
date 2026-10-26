@@ -2,3 +2,5 @@
 
 // CMake-generated build paths. Do not edit; edit CMakeLists.txt / vkmotion_config.hpp.in instead.
 #define VKMOTION_SHADER_DIR "@VKMOTION_SHADER_BINARY_DIR@"
+#define VKMOTION_GLSLC "@GLSLC_EXECUTABLE@"
+#define VKMOTION_SHADER_SOURCE_DIR "@CMAKE_CURRENT_SOURCE_DIR@/shaders"

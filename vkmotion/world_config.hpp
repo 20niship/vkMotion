@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cutil/ref.hpp>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -13,15 +14,42 @@ class WorldConfig {
  public:
   static cutil::Ref<WorldConfig> from_file(const std::string& yaml_path);
 
-  void add_obstacle(const Cuboid& obstacle) { cuboid_.push_back(obstacle); }
-  void add_obstacle(const Sphere& obstacle) { sphere_.push_back(obstacle); }
-  void add_obstacle(const Cylinder& obstacle) { cylinder_.push_back(obstacle); }
-  void add_obstacle(const Capsule& obstacle) { capsule_.push_back(obstacle); }
-  void add_obstacle(const Plane& obstacle) { plane_.push_back(obstacle); }
-  void add_obstacle(const ConvexMesh& obstacle) { convex_mesh_.push_back(obstacle); }
-  void add_obstacle(const SDFGrid& obstacle) { sdf_grid_.push_back(obstacle); }
-  void add_attached_object(const AttachedObject& obstacle) { attached_.push_back(obstacle); }
+  void add_obstacle(const Cuboid& obstacle) {
+    cuboid_.push_back(obstacle);
+    version_++;
+  }
+  void add_obstacle(const Sphere& obstacle) {
+    sphere_.push_back(obstacle);
+    version_++;
+  }
+  void add_obstacle(const Cylinder& obstacle) {
+    cylinder_.push_back(obstacle);
+    version_++;
+  }
+  void add_obstacle(const Capsule& obstacle) {
+    capsule_.push_back(obstacle);
+    version_++;
+  }
+  void add_obstacle(const Plane& obstacle) {
+    plane_.push_back(obstacle);
+    version_++;
+  }
+  void add_obstacle(const ConvexMesh& obstacle) {
+    convex_mesh_.push_back(obstacle);
+    version_++;
+  }
+  void add_obstacle(const SDFGrid& obstacle) {
+    sdf_grid_.push_back(obstacle);
+    version_++;
+  }
+  void add_attached_object(const AttachedObject& obstacle) {
+    attached_.push_back(obstacle);
+    version_++;
+  }
+  // 内容が変わるたびに増える。コンパイル済みキャッシュ(RobotWorldのfast path)の無効化判定に使う。
+  uint64_t version() const { return version_; }
   void clear() {
+    version_++;
     cuboid_.clear();
     sphere_.clear();
     cylinder_.clear();
@@ -42,6 +70,7 @@ class WorldConfig {
   const std::vector<AttachedObject>& attached_objects() const { return attached_; }
 
  private:
+  uint64_t version_ = 0;
   std::vector<Cuboid> cuboid_;
   std::vector<Sphere> sphere_;
   std::vector<Cylinder> cylinder_;

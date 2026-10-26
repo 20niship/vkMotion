@@ -1,0 +1,63 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// GPU RRT-Connectのラウンド間処理(1ワークグループ)。ラウンド番号を進め、解けていれば次のdispatchを0本にし、
+// そうでなければ木のスナップショット(これ未満のノードだけ次ラウンドで読める)を更新して、次ラウンドのワープ数を決める。
+// 最初のラウンドでは根ノード(start / goals)も書く。
+
+layout(local_size_x = 32) in;
+
+#include "include/rrt_common.glsl"
+
+void main() {
+  const uint t = gl_LocalInvocationID.x;
+  init_quant();
+  const uint r = ctl[CTL_ROUND];
+  if(r == 0u) {
+    float q[8];
+    if(t == 0u) {
+      for(uint j = 0; j < 8u; j++) q[j] = prm[24u + j];
+      nd[0] = pack_node(q, -1);
+    }
+    if(t < pc.num_goals) {
+      for(uint j = 0; j < 8u; j++) q[j] = prm[32u + t * 8u + j];
+      nd[CAP + t] = pack_node(q, -1);
+    }
+  }
+  barrier();
+  if(t != 0u) return;
+
+  ctl[CTL_ROUND] = r + 1u;
+  if(ctl[CTL_SOLVED] >= pc.gen) {
+    ctl[CTL_ARGS]      = 0u;
+    ctl[CTL_ARGS + 1u] = 1u;
+    ctl[CTL_ARGS + 2u] = 1u;
+    return;
+  }
+  uint c0 = ctl[CTL_CNT0], c1 = ctl[CTL_CNT1];
+  // 余裕: 最初は pc.margin。片方の木がもう片方の1/12未満しか伸びていなければ(端点が障害物すれすれ)、2ラウンドごとに 1/4 -> 0 と縮める。
+  // それまでに木に入れたノードは大きい余裕のものなので、縮めても有効。
+  float margin = r == 0u ? pc.margin : uintBitsToFloat(ctl[CTL_MARGIN]);
+  if(r >= 3u && margin > 0.0 && r >= ctl[CTL_STAGE] + 2u && min(c0, c1 - pc.num_goals + 1u) * 12u < max(c0, c1 - pc.num_goals + 1u)) {
+    // 1/4 までは早めに、0(障害物に接する経路を許す)は長く止まったときだけ(別の検証器で見たとき食い込む経路が増えるため)
+    if(margin > 0.3 * pc.margin) margin = 0.25 * pc.margin;
+    else if(r >= 12u) margin = 0.0;
+    ctl[CTL_STAGE] = r;
+  }
+  ctl[CTL_MARGIN] = floatBitsToUint(margin);
+  if(r == 0u || c0 > CAP_SOFT || c1 > CAP_SOFT) {
+    c0 = 1u;
+    c1 = pc.num_goals;
+  }
+  c0 = min(c0, CAP);
+  c1 = min(c1, CAP);
+  ctl[CTL_CNT0]  = c0;
+  ctl[CTL_CNT1]  = c1;
+  ctl[CTL_SNAP0] = c0;
+  ctl[CTL_SNAP1] = c1;
+  uint g = pc.g0 << min(r / max(pc.grow, 1u), 16u);
+  g      = min(g, pc.gmax);
+  ctl[CTL_ARGS]      = g;
+  ctl[CTL_ARGS + 1u] = 1u;
+  ctl[CTL_ARGS + 2u] = 1u;
+}
