@@ -36,5 +36,10 @@ void main() {
   uint idx = gl_GlobalInvocationID.x;
   if(idx >= pc.num_configs) return;
   for(uint j = 0; j < pc.dof; j++) Q[j] = cfg[idx * pc.dof + j];
-  out_free[idx] = config_free() ? 1u : 0u;
+  bool ok = config_free();
+  for(uint r = 1u; r < pc.pad0; r++) {  // 計測用(bench --micro): pad0回繰り返す
+    Q[0] += 1e-4;
+    ok = config_free() && ok;
+  }
+  out_free[idx] = ok ? 1u : 0u;
 }

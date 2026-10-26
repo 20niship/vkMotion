@@ -1,6 +1,7 @@
 #include "vk_validate.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <vkmotion/vkmotion_config.hpp>
 
@@ -89,6 +90,7 @@ void VkValidatePipeline::validate(const float* q, size_t n, float margin, uint8_
   pc.num_balls    = static_cast<uint32_t>(num_balls_);
   pc.num_links    = static_cast<uint32_t>(robot_.num_links);
   pc.margin       = margin;
+  if(const char* e = std::getenv("VKM_REPEAT")) pc.pad0 = static_cast<uint32_t>(std::atoi(e));
   pipeline_->dispatch(static_cast<uint32_t>((n + kLocalSize - 1) / kLocalSize), &pc, sizeof(pc));
 
   std::vector<uint32_t> flags(n);

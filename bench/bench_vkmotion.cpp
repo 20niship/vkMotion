@@ -297,8 +297,12 @@ int micro_mode(const std::string& data) {
     const size_t dof = fc.dof();
     for(size_t n : {32, 64, 1792, 3584, 7168, 14336, 28672, 100000}) {
       std::vector<float> q(n * dof);
+      // 自由なコンフィグだけ使う(衝突コンフィグは早期終了して実コストより安く見える)
+      const auto& valid = samples["scenes"][scene]["valid"];
+      std::vector<size_t> free_idx;
+      for(size_t i = 0; i < qs.size(); i++) if(valid[i].get<int>()) free_idx.push_back(i);
       for(size_t i = 0; i < n; i++)
-        for(size_t j = 0; j < dof; j++) q[i * dof + j] = qs[i % qs.size()][j];
+        for(size_t j = 0; j < dof; j++) q[i * dof + j] = qs[free_idx[i % free_idx.size()]][j];
       std::vector<uint8_t> out(n);
       vp.validate(q.data(), n, 0.0f, out.data());
       std::vector<double> t;

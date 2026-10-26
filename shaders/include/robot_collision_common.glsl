@@ -148,6 +148,29 @@ bool box_group_hit(uint bo, int g) {
   return false;
 }
 
+// クラスタcと直方体boの球単位の衝突(クラスタ境界球を通過した後に呼ぶ)
+bool box_cluster_hit(uint bo, int c) {
+  ivec4 cm = s_cluster_meta[c];
+  for(int i = cm.y; i < cm.y + cm.z; i++) {
+    float r = sph[i].w + MARGIN;
+    if(box_sumsq(bo, sph[i].xyz) <= r * r) return true;
+  }
+  return false;
+}
+
+// クラスタa,bの球単位の自己衝突(クラスタ境界球を通過した後に呼ぶ)
+bool cluster_pair_hit(int ca, int cb) {
+  ivec4 cma = s_cluster_meta[ca], cmb = s_cluster_meta[cb];
+  for(int i = cma.y; i < cma.y + cma.z; i++) {
+    for(int j = cmb.y; j < cmb.y + cmb.z; j++) {
+      vec3 e   = sph[i].xyz - sph[j].xyz;
+      float rs = sph[i].w + sph[j].w + 2.0 * MARGIN;
+      if(dot(e, e) <= rs * rs) return true;
+    }
+  }
+  return false;
+}
+
 // グループgとh(別リンク)の自己衝突(クラスタ境界球 -> 球)
 bool group_pair_hit(int g, int h) {
   ivec4 ga = s_group_meta[g], gh = s_group_meta[h];

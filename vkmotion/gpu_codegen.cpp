@@ -78,6 +78,13 @@ bool file_exists(const std::string& p) {
 std::string generate_robot_glsl(const GpuRobotData& r) {
   std::ostringstream o;
   const int ns = r.num_steps;
+  // 衝突球の世界座標の式(リンク姿勢はレジスタにあるので、必要なときだけその場で計算する)
+  auto sphere_pos = [&](int cluster, int i) {
+    const int link = r.cluster_meta[static_cast<size_t>(cluster * 4)];
+    const float* sp = &r.spheres[static_cast<size_t>(i * 4)];
+    return "rot_apply(R" + std::to_string(link) + ", " + vec3_lit(sp[0], sp[1], sp[2]) + ") + P" + std::to_string(link);
+  };
+  auto sphere_r = [&](int i) { return r.spheres[static_cast<size_t>(i * 4 + 3)]; };
   o << "// 自動生成(vkmotion/gpu_codegen.cpp)。手で編集しないこと。\n";
   o << "bool config_free() {\n";
   // 関節ごとのsin/cos(回転ジョイントだけ)
@@ -90,6 +97,7 @@ std::string generate_robot_glsl(const GpuRobotData& r) {
   for(int s = 0; s < ns; s++) links.insert(r.step_meta[static_cast<size_t>(s * 4 + 1)]);
   for(int l : links) o << "  float R" << l << "[9];\n  vec3 P" << l << ";\n";
   for(int g = 0; g < r.num_groups; g++) o << "  vec3 G" << g << ";\n";
+  for(int c = 0; c < r.num_clusters; c++) o << "  vec3 C" << c << ";\n";
 
   for(int s = 0; s < ns; s++) {
     const int* m  = &r.step_meta[static_cast<size_t>(s * 4)];
@@ -137,12 +145,7 @@ std::string generate_robot_glsl(const GpuRobotData& r) {
       const int first = r.group_meta[static_cast<size_t>(g * 4)], count = r.group_meta[static_cast<size_t>(g * 4 + 1)];
       for(int c = first; c < first + count; c++) {
         const float* cb = &r.cluster_bs[static_cast<size_t>(c * 4)];
-        o << "    cbs[" << c << "] = rot_apply(R" << ch << ", " << vec3_lit(cb[0], cb[1], cb[2]) << ") + P" << ch << ";\n";
-        const int sb = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
-        for(int i = sb; i < sb + sc; i++) {
-          const float* sp = &r.spheres[static_cast<size_t>(i * 4)];
-          o << "    sph[" << i << "] = vec4(rot_apply(R" << ch << ", " << vec3_lit(sp[0], sp[1], sp[2]) << ") + P" << ch << ", " << lit(sp[3]) << ");\n";
-        }
+        o << "    C" << c << " = rot_apply(R" << ch << ", " << vec3_lit(cb[0], cb[1], cb[2]) << ") + P" << ch << ";\n";
       }
     }
     o << "  }\n";
@@ -155,15 +158,52 @@ std::string generate_robot_glsl(const GpuRobotData& r) {
     const float rad = r.group_bs[static_cast<size_t>(g * 4 + 3)];
     o << "    if(((allow >> " << g << "u) & 1u) == 0u && all(lessThanEqual(abs(G" << g << " - center) - aabb_half - vec3(" << lit(rad) << " + MARGIN), vec3(0.0)))) cand |= " << (1u << g) << "u;\n";
   }
-  o << "    while(cand != 0u) {\n      const int g = findLSB(cand);\n      cand &= cand - 1u;\n      if(box_group_hit(bo, g)) return false;\n    }\n  }\n";
-  o << "  if(balls_hit()) return false;\n";
+  for(int g = 0; g < r.num_groups; g++) {
+    const int first = r.group_meta[static_cast<size_t>(g * 4)], count = r.group_meta[static_cast<size_t>(g * 4 + 1)];
+    o << "    if((cand & " << (1u << g) << "u) != 0u) {\n";
+    for(int c = first; c < first + count; c++) {
+      const float rc = r.cluster_bs[static_cast<size_t>(c * 4 + 3)];
+      o << "      { float rc = " << lit(rc) << " + MARGIN; if(box_sumsq(bo, C" << c << ") <= rc * rc) {\n";
+      const int sb = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
+      for(int i = sb; i < sb + sc; i++) o << "        { float q = " << lit(sphere_r(i)) << " + MARGIN; if(box_sumsq(bo, " << sphere_pos(c, i) << ") <= q * q) return false; }\n";
+      o << "      } }\n";
+    }
+    o << "    }\n";
+  }
+  o << "  }\n";
+  {
+    // 球障害物(数が少ない)はsph[]を引く汎用判定を使うので、あるときだけ全球の世界座標を書き出す
+    o << "  if(pc.num_balls != 0u) {\n";
+    for(int c = 0; c < r.num_clusters; c++) {
+      const int sb = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
+      for(int i = sb; i < sb + sc; i++) o << "    sph[" << i << "] = vec4(" << sphere_pos(c, i) << ", " << lit(sphere_r(i)) << ");\n";
+    }
+    o << "    if(balls_hit()) return false;\n  }\n";
+  }
   // 自己衝突: リンクペアは静的
   for(int g = 0; g < r.num_groups; g++) {
     const int mask = r.pairs[static_cast<size_t>(g)];
     for(int h = g + 1; h < r.num_groups; h++) {
       if(!((mask >> h) & 1)) continue;
       const float rr = r.group_bs[static_cast<size_t>(g * 4 + 3)] + r.group_bs[static_cast<size_t>(h * 4 + 3)];
-      o << "  { vec3 d = G" << g << " - G" << h << "; float rr = " << lit(rr) << " + 2.0 * MARGIN; if(dot(d, d) <= rr * rr && group_pair_hit(" << g << ", " << h << ")) return false; }\n";
+      o << "  { vec3 d = G" << g << " - G" << h << "; float rr = " << lit(rr) << " + 2.0 * MARGIN;\n    if(dot(d, d) <= rr * rr) {\n";
+      const int fa = r.group_meta[static_cast<size_t>(g * 4)], na = r.group_meta[static_cast<size_t>(g * 4 + 1)];
+      const int fb = r.group_meta[static_cast<size_t>(h * 4)], nb = r.group_meta[static_cast<size_t>(h * 4 + 1)];
+      for(int ca = fa; ca < fa + na; ca++)
+        for(int cb = fb; cb < fb + nb; cb++) {
+          const float rc = r.cluster_bs[static_cast<size_t>(ca * 4 + 3)] + r.cluster_bs[static_cast<size_t>(cb * 4 + 3)];
+          o << "      { vec3 e = C" << ca << " - C" << cb << "; float q = " << lit(rc) << " + 2.0 * MARGIN; if(dot(e, e) <= q * q) {\n";
+          const int sba = r.cluster_meta[static_cast<size_t>(ca * 4 + 1)], sca = r.cluster_meta[static_cast<size_t>(ca * 4 + 2)];
+          const int sbb = r.cluster_meta[static_cast<size_t>(cb * 4 + 1)], scb = r.cluster_meta[static_cast<size_t>(cb * 4 + 2)];
+          for(int i = sba; i < sba + sca; i++) {
+            o << "        { vec3 a = " << sphere_pos(ca, i) << ";\n";
+            for(int jj = sbb; jj < sbb + scb; jj++)
+              o << "          { vec3 b = " << sphere_pos(cb, jj) << "; vec3 w = a - b; float z = " << lit(sphere_r(i) + sphere_r(jj)) << " + 2.0 * MARGIN; if(dot(w, w) <= z * z) return false; }\n";
+            o << "        }\n";
+          }
+          o << "      } }\n";
+        }
+      o << "    } }\n";
     }
   }
   o << "  return true;\n}\n";
