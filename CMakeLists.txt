@@ -39,6 +39,12 @@ foreach(shader_src ${VKMOTION_SHADER_SOURCES})
 endforeach()
 add_custom_target(vkmotion_shaders DEPENDS ${VKMOTION_SPV_FILES})
 
+# 実行時に生成するCPUカーネルのコンパイル用フラグ(ライブラリ本体と同じ命令セットにする)
+if(VKMOTION_NATIVE_ARCH)
+  set(VKMOTION_JIT_FLAGS "-O2 -march=native -fno-math-errno -std=c++20 -shared -fPIC")
+else()
+  set(VKMOTION_JIT_FLAGS "-O2 -fno-math-errno -std=c++20 -shared -fPIC")
+endif()
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/vkmotion_config.hpp.in
   ${CMAKE_BINARY_DIR}/generated/vkmotion/vkmotion_config.hpp
@@ -72,7 +78,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   endif()
 endif()
 find_package(Threads REQUIRED)
-target_link_libraries(vkmotion PUBLIC Threads::Threads)
+target_link_libraries(vkmotion PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 
 target_compile_definitions(vkmotion PUBLIC
   $<$<BOOL:${VKMOTION_ENABLE_VALIDATION}>:VKMOTION_ENABLE_VALIDATION=1>)

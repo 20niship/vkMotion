@@ -20,7 +20,7 @@ struct GpuRrtSettings {
   uint32_t first_warps = 256;    // 最初のラウンドで木を伸ばすワープ数
   uint32_t max_warps   = 896;   // ワープ数の上限(first_warpsから、ラウンドごとに倍々で増やす)
   uint32_t iters       = 1;     // 1ラウンドで各ワープが行うRRT-Connect反復の数
-  uint32_t rounds_per_submit = 24;  // 1回のsubmitに積むラウンド数(解けたら残りのdispatchは0本になる)
+  uint32_t rounds_per_submit = 8;   // 1回のsubmitに積むラウンド数(解けたら残りのdispatchは0本になる)
   uint32_t max_submits       = 4;   // 解けなければ続けてsubmitする回数の上限
 };
 

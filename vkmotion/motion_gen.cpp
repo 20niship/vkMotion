@@ -405,7 +405,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       }
       GpuRrtSettings gs;
       gs.motion_step = step;
-      gs.max_submits = 2;
+      gs.max_submits = 6;
       gs.margin = margin;  // 端点がすれすれで木が伸びないときはGPU側が余裕を縮める
       for(int attempt = 0; attempt < 12 && remaining() > 0.02; attempt++) {
         gs.seed = static_cast<uint32_t>(seed + 7919ull * static_cast<uint64_t>(attempt));

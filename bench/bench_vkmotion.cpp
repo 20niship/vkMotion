@@ -286,6 +286,23 @@ int micro_mode(const std::string& data) {
       if(p["scene"] == scene) { fill_world(*world, p["objects"]); break; }
     FastCollision fc(*robot, acm);
     fc.set_world(*world);
+    {
+      // CPU: 8コンフィグ(自由なものだけ)の判定を1スレッドで繰り返す
+      const auto& q0 = samples["q"];
+      const auto& valid0 = samples["scenes"][scene]["valid"];
+      std::vector<float> blk(8 * fc.dof());
+      std::vector<size_t> fi;
+      for(size_t i = 0; i < q0.size(); i++) if(valid0[i].get<int>()) fi.push_back(i);
+      uint32_t acc = 0;
+      const int reps = 200000;
+      auto tc0 = Clock::now();
+      for(int r = 0; r < reps; r++) {
+        for(size_t lane = 0; lane < 8; lane++)
+          for(size_t j = 0; j < fc.dof(); j++) blk[lane * fc.dof() + j] = q0[fi[(static_cast<size_t>(r) * 8 + lane) % fi.size()]][j];
+        acc += fc.free_mask8(blk.data(), 0.0f);
+      }
+      std::cout << scene << " CPU free_mask8 (1 thread, jit=" << fc.jit_active() << "): " << ms_since(tc0) * 1e3 / reps << " us/block (acc " << acc << ")\n";
+    }
     GpuRobotData rd;
     GpuWorldData wd;
     fc.pack_gpu_robot(rd);

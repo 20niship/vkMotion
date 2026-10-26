@@ -1,5 +1,6 @@
 #include "vk_pipeline.hpp"
 
+#include <chrono>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -259,6 +260,10 @@ void VkComputeSequence::submit_and_wait() {
   submit_info.commandBufferCount = 1;
   submit_info.pCommandBuffers    = &cmd_;
   vkQueueSubmit(ctx_.compute_queue(), 1, &submit_info, fence_);
+  // 数msで終わる処理なので、まず短時間スピンして完了を拾う(ブロッキング待ちはスレッド起床に数十〜百µsかかる)。長引けば通常の待ちに切り替える。
+  const auto spin_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
+  while(vkGetFenceStatus(ctx_.device(), fence_) == VK_NOT_READY && std::chrono::steady_clock::now() < spin_until) {
+  }
   vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, UINT64_MAX);
 }
 

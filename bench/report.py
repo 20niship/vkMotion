@@ -202,17 +202,25 @@ def section_before_after(now, base):
     return table(["実装", "項目", "問題数", "成功率(前)", "median(前) [ms]", "成功率(後)", "median(後) [ms]", "高速化"], rows)
 
 
-NOTES = """- **精度**: FK・衝突判定(2000サンプル)・姿勢ゴールの末端誤差は3実装で同等(サブマイクロメートル〜0.01mm台、衝突判定はVAMPと100%一致)。`VAMP検証で衝突なし`はVAMP自身・cuRoboも100%ではない。
-  サンプリングで検査するプランナーは、障害物に接した経路を作ると別の検証器の検査点では微小に食い込むため。vkMotionは経路の内部点に`collision_margin`(5mm)の余裕を持たせてこれを抑えている。
-- **速度**: 関節ゴール・姿勢ゴールとも、中央値はVAMP(関節ゴール)と同程度以上、cuRoboより2桁速い(cuRoboはGPU上の軌道最適化で、1回の呼び出しに数百ms)。
-  一方、裾(p95/p99)はVAMPより長い。RRT-Connectの探索時間のばらつきによるもので、`MotionGenConfig::num_threads`を増やすと一部の問題で緩和される。
-- **衝突判定スループット**: 10万config一括ではVulkanバッチ・CPU SIMD(8スレッド)ともcuRoboを上回る。1configずつの逐次判定は1〜2µs(計画ループはこのSIMD版を8点まとめて呼ぶ)。
-  VAMPの値はpythonバインディングの呼び出しオーバーヘッドを含むため、ネイティブ呼び出しのVAMPはもっと速い。
-- **経路の質**: 経路長はVAMPと同程度、cuRoboより長い(cuRoboは軌道最適化、vkMotionは幾何経路+shortcut)。vkMotionの軌道は折れ線で、速度・加速度の制限は守るが(上の表の最大関節加速度を参照)jerk制限は持たない。
-  cuRoboはjerk制限つきの滑らかなB-spline軌道を返す。
-- **IK**: vkMotionは運動学的IKの解を衝突判定で棄却する方式(解析ヤコビアン+LM、多シード)。cuRoboは衝突コストを最適化に含める。狭所のゴールではvkMotionは多くのシードが必要になる(時間はms単位で済んでいる)。
-- **計測の注意**: VAMP・cuRobo・vkMotionは同じマシンで直列に計測しているが、他プロセスの負荷は制御していない(冒頭の「計測開始時のマシン負荷」)。負荷があるとCPU側(VAMP・vkMotion)の時間は悪化する。
-  cuRoboはmax_attempts=10・graph seed 2回目以降で実行(既定は5)。成功率は問題数が少ないとき±数%の幅がある。"""
+NOTES = """
+- **VAMPとの比較(正直なところ)**: 中央値はVAMPと同程度(vkMotion CPUが0.3ms前後、VAMPが0.35ms)で、「VAMPの数倍速い」には届いていない。
+  裾はVAMPが明確に良い(VAMP p95≈1ms/p99≈1.6ms に対して、vkMotion CPUはp95≈6ms/p99≈12ms、GPU探索併用でp99≈7ms)。難しいケース(`cage`)の1問あたりの上限は
+  vkMotion CPU 約15〜20ms / GPU探索 約7〜9ms / VAMP 約3ms。VAMPの時間は`time_ms`=1回目の実行(plan+simplify、`time_ms_median3`は3回の中央値)。
+- **なぜ裾が長いか**: VAMPの`cage`は約1000反復を約0.6msで回す(1反復0.6µs)。vkMotionは1反復あたり約3µsで、ロボット専用に展開したカーネル(`gpu_codegen`)を使っても
+  8コンフィグの衝突判定が約0.6〜0.9µsかかる(VAMPは約0.2µs)。主因は箱×リンクグループのブロードフェーズで、VAMPのように障害物を距離順に並べて早期に打ち切っても改善しなかった。
+- **GPU探索**(`MotionGenConfig::gpu_search`): 1本の木を多数のワープで共有して伸ばすVulkan compute版RRT-Connect。ラウンドをdispatchに分けて1回のsubmitに並べる(CUDA graphに相当)。
+  submitの固定費が約0.5msあるので、まずCPUで`gpu_handoff_s`(1ms)試し、解けなければGPUに渡す構成が既定。GPUは裾(難しい問題)を短くする用途で、中央値は縮めない。
+  GPUはアイドルが続くとクロックが落ち、疎な呼び出しでは遅くなる(固定クロックにすると改善する)。
+- **精度**: FK・衝突判定(2000サンプル)・姿勢ゴールの末端誤差は各実装で同等(サブマイクロメートル〜0.01mm台、衝突判定はVAMPと100%一致)。`VAMP検証で衝突なし`はVAMP自身・cuRoboも100%ではない。
+  サンプリングで検査するプランナーは、障害物に接した経路を作ると別の検証器の検査点では微小に食い込むため。vkMotionは経路の内部点に`collision_margin`(5mm)の余裕を持たせてこれを抑えるが、
+  端点が障害物すれすれで木が伸びないときだけ余裕を縮めるので、その問題では食い込む経路が出うる。
+- **衝突判定スループット**: 10万config一括ではVulkanバッチ・CPU SIMD(8スレッド)ともcuRoboを上回る。VAMPの値はpythonバインディングの呼び出しオーバーヘッドを含む。
+- **cuRoboとの関係**: cuRoboは姿勢ゴールをGPU上の多シードIK + 多シード軌道最適化(CUDA graph)で解き、PRMグラフは再試行時のシード用。スループット重視で1回数百ms。
+  vkMotionは幾何経路(RRT-Connect)なので2桁速いが、経路は折れ線でjerk制限を持たず、経路長はcuRoboより長い。
+- **IK**: vkMotionは運動学的IKの解を衝突判定で棄却する方式(解析ヤコビアン+LM、多シード)。cuRoboは衝突コストを最適化に含める。
+- **計測の注意**: 他プロセスの負荷は制御していない(冒頭の「計測開始時のマシン負荷」)。以前の版はollamaがCPUを約1000%使っていた状態の数値で、VAMPが約1.5msに見えていたが、
+  負荷が無い状態では0.35msだった。GPUも他セッションと共有しており、GPU探索の数値は±数十%ぶれる。cuRoboはmax_attempts=10・graph seed 2回目以降で実行(既定は5)。
+"""
 
 
 def env_info():

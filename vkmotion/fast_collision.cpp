@@ -1,4 +1,5 @@
 #include "fast_collision.hpp"
+#include "gpu_codegen.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -238,6 +239,10 @@ FastCollision::FastCollision(const RobotConfig& robot, const AllowedCollisionMat
       for(size_t j = 0; j < b.size(); j++) joint_reach_[j] = std::max(joint_reach_[j], b[j]);
     }
   }
+
+  // ロボット専用のSIMDカーネルを生成・コンパイルする(初回は数秒、以降はディスクのキャッシュ)。使えなければ汎用のmask8_implのまま。
+  GpuRobotData rd;
+  if(pack_gpu_robot(rd)) jit_ = load_cpu_kernel(rd, kin_.dof());
 }
 
 bool FastCollision::pack_gpu_robot(GpuRobotData& o) const {
@@ -308,14 +313,26 @@ void FastCollision::pack_gpu_world(GpuWorldData& o) const {
     std::memcpy(&f, &m, sizeof(f));
     return f;
   };
-  size_t obs = 0;
-  for(const Box& b : boxes_) {
-    o.boxes.insert(o.boxes.end(), {b.c[0], b.c[1], b.c[2], mask_of(obs++)});
-    for(int r = 0; r < 3; r++) o.boxes.insert(o.boxes.end(), {b.rot[r * 3], b.rot[r * 3 + 1], b.rot[r * 3 + 2], 0.0f});
+  // 箱はロボットのベース(原点)からの最短距離の昇順に並べる。球の原点からの距離+半径が箱の最短距離より小さければ、それ以降の箱は遠すぎて当たらない(VAMPと同じ打ち切り)。
+  // 最短距離(保守的な下界)は rt行0 の w に入れる。
+  auto min_dist = [&](const Box& b) {
+    const float c  = std::sqrt(b.c[0] * b.c[0] + b.c[1] * b.c[1] + b.c[2] * b.c[2]);
+    const float h  = std::sqrt(b.half[0] * b.half[0] + b.half[1] * b.half[1] + b.half[2] * b.half[2]);
+    return std::max(0.0f, c - h);
+  };
+  std::vector<size_t> order(boxes_.size());
+  for(size_t i = 0; i < order.size(); i++) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return min_dist(boxes_[a]) < min_dist(boxes_[b]); });
+  for(size_t k : order) {
+    const Box& b = boxes_[k];
+    o.boxes.insert(o.boxes.end(), {b.c[0], b.c[1], b.c[2], mask_of(k)});
+    o.boxes.insert(o.boxes.end(), {b.rot[0], b.rot[1], b.rot[2], min_dist(b)});
+    for(int r = 1; r < 3; r++) o.boxes.insert(o.boxes.end(), {b.rot[r * 3], b.rot[r * 3 + 1], b.rot[r * 3 + 2], 0.0f});
     o.boxes.insert(o.boxes.end(), {b.half[0], b.half[1], b.half[2], 0.0f});
     o.boxes.insert(o.boxes.end(), {b.aabb_half[0], b.aabb_half[1], b.aabb_half[2], 0.0f});
   }
   o.num_boxes = static_cast<int>(boxes_.size());
+  size_t obs  = boxes_.size();
   for(const Ball& b : balls_) {
     o.balls.insert(o.balls.end(), {b.c[0], b.c[1], b.c[2], b.r});
     o.balls.insert(o.balls.end(), {mask_of(obs++), 0.0f, 0.0f, 0.0f});
@@ -389,6 +406,14 @@ bool FastCollision::set_world(const WorldConfig& world) {
     p.n[2] = rt[8];
     planes_.push_back(p);
     push_allowed(o.name);
+  }
+  {
+    GpuWorldData wd;  // ロボット専用カーネルに渡す箱・球の配列(GPUと同じ並び)
+    pack_gpu_world(wd);
+    jit_boxes_     = std::move(wd.boxes);
+    jit_balls_     = std::move(wd.balls);
+    jit_num_boxes_ = wd.num_boxes;
+    jit_num_balls_ = wd.num_balls;
   }
   return true;
 }
@@ -493,41 +518,6 @@ int FastCollision::motion_steps(const float* a, const float* b, float step_overr
 
 namespace {
 
-// 8レーン同時のsin/cos (cephesのsinf/cosfと同じCody-Waite縮約+最小二乗多項式。|x|<8192で誤差~1e-7)
-inline void sincos8(v8f x, v8f* sn, v8f* cs) {
-  const v8i sign_mask = {static_cast<int>(0x80000000), static_cast<int>(0x80000000), static_cast<int>(0x80000000), static_cast<int>(0x80000000),
-                         static_cast<int>(0x80000000), static_cast<int>(0x80000000), static_cast<int>(0x80000000), static_cast<int>(0x80000000)};
-  const v8i abs_mask  = ~sign_mask;
-  const v8i x_bits    = reinterpret_cast<v8i>(x);
-  const v8i sin_sign  = x_bits & sign_mask;
-  const v8f ax        = reinterpret_cast<v8f>(x_bits & abs_mask);
-  v8i j               = __builtin_convertvector(ax * 1.27323954473516f, v8i);  // 4/pi
-  j                   = (j + 1) & ~v8i{1, 1, 1, 1, 1, 1, 1, 1};
-  const v8f y         = __builtin_convertvector(j, v8f);
-  const v8f r         = ((ax - y * 0.78515625f) - y * 2.4187564849853515625e-4f) - y * 3.77489497744594108e-8f;
-  const v8f z         = r * r;
-  const v8f sp        = ((-1.9515295891E-4f * z + 8.3321608736E-3f) * z - 1.6666654611E-1f) * z * r + r;
-  const v8f cp        = ((2.443315711809948E-005f * z - 1.388731625493765E-003f) * z + 4.166664568298827E-002f) * z * z - 0.5f * z + 1.0f;
-  const v8i two       = {2, 2, 2, 2, 2, 2, 2, 2}, four = {4, 4, 4, 4, 4, 4, 4, 4};
-  const v8i swap      = ((j & two) == v8i{}) ? v8i{} - 1 : v8i{};  // j&2 == 0 -> 全ビット1
-  v8f s_val           = reinterpret_cast<v8f>((reinterpret_cast<v8i>(sp) & swap) | (reinterpret_cast<v8i>(cp) & ~swap));
-  v8f c_val           = reinterpret_cast<v8f>((reinterpret_cast<v8i>(cp) & swap) | (reinterpret_cast<v8i>(sp) & ~swap));
-  const v8i sin_flip  = ((j & four) << 29) ^ sin_sign;                      // j&4 -> 符号ビット
-  const v8i cos_flip  = (((j & four) ^ ((j & two) << 1)) << 29);
-  *sn                 = reinterpret_cast<v8f>(reinterpret_cast<v8i>(s_val) ^ sin_flip);
-  *cs                 = reinterpret_cast<v8f>(reinterpret_cast<v8i>(c_val) ^ cos_flip);
-}
-
-inline uint32_t movemask(v8i m) {
-#ifdef __AVX__
-  return static_cast<uint32_t>(_mm256_movemask_ps(reinterpret_cast<__m256>(m)));
-#else
-  uint32_t r = 0;
-  for(int i = 0; i < 8; i++) r |= (m[i] != 0 ? 1u : 0u) << i;
-  return r;
-#endif
-}
-
 // 箱(中心c, world->local回転rt, 半径h)までの距離^2(外側のみ。内部なら0)
 inline v8f box_sumsq(const float* c, const float* rt, const float* h, v8f x, v8f y, v8f z) {
   const v8f dx = x - c[0], dy = y - c[1], dz = z - c[2];
@@ -550,6 +540,16 @@ inline v8f box_sumsq(const float* c, const float* rt, const float* h, v8f x, v8f
 uint32_t FastCollision::mask8_impl(const float* q, float margin, bool broadcast, uint32_t required) const {
   g_block_count++;
   const size_t dof = kin_.dof();
+  if(jit_ && simd_supported()) {
+    float qb[8 * 16];
+    const float* qq = q;
+    if(broadcast) {
+      for(size_t lane = 0; lane < 8; lane++)
+        for(size_t j = 0; j < dof; j++) qb[lane * dof + j] = q[j];
+      qq = qb;
+    }
+    return jit_(qq, margin, required, jit_boxes_.data(), jit_num_boxes_, jit_balls_.data(), jit_num_balls_);
+  }
   if(!simd_supported()) {
     if(broadcast) return free_scalar(q, margin) ? 0xFFu : 0u;
     uint32_t m = 0;

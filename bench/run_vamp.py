@@ -51,7 +51,7 @@ def bench_plan(problems, repeats):
                     succ += 1
                 else:
                     times.append((timer() - t0) * 1e3)
-            row.update(success=succ == repeats, success_rate=succ / repeats, time_ms=float(np.median(times)), path_len=float(np.median(plens)) if plens else None,
+            row.update(success=succ == repeats, success_rate=succ / repeats, time_ms=float(times[0]), time_ms_median3=float(np.median(times)), path_len=float(np.median(plens)) if plens else None,
                        n_waypoints=int(np.median(nwp)) if nwp else None, path=paths[0] if paths else None)
         rows.append(row)
     return rows

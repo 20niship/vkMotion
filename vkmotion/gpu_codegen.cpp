@@ -4,6 +4,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <dlfcn.h>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -257,6 +259,211 @@ std::string compile_specialized_shader(const std::string& entry_shader, const Gp
     return file_exists(out) ? out : "";
   }
   return out;
+}
+
+
+// ---- CPU(8レーンSIMD)版 ----
+
+std::string generate_robot_cpp(const GpuRobotData& r, size_t dof) {
+  std::ostringstream o;
+  auto litf = [](float v) { return lit(v) + "f"; };
+  const int ns = r.num_steps;
+  o << "// 自動生成(vkmotion/gpu_codegen.cpp generate_robot_cpp)。手で編集しないこと。\n";
+  o << "#include <cstdint>\n#include <cstring>\n#include \"vkmotion/simd8.hpp\"\nusing namespace vkmotion;\nnamespace {\n";
+  o << "inline v8f absf(v8f x) { const v8i m = {0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff}; return reinterpret_cast<v8f>(reinterpret_cast<v8i>(x) & m); }\n";
+  o << "inline v8f maxz(v8f x) { const v8f z = {}; return x > z ? x : z; }\n";
+  // 箱(pack_gpu_worldの24 float): center+allow, rt行0..2, half, aabb_half
+  o << "inline v8f bsq(const float* b, v8f x, v8f y, v8f z) {\n"
+       "  const v8f dx = x - b[0], dy = y - b[1], dz = z - b[2];\n"
+       "  const v8f lx = absf(b[4] * dx + b[5] * dy + b[6] * dz) - b[16];\n"
+       "  const v8f ly = absf(b[8] * dx + b[9] * dy + b[10] * dz) - b[17];\n"
+       "  const v8f lz = absf(b[12] * dx + b[13] * dy + b[14] * dz) - b[18];\n"
+       "  const v8f ox = maxz(lx), oy = maxz(ly), oz = maxz(lz);\n  return ox * ox + oy * oy + oz * oz;\n}\n";
+  o << "inline uint32_t bits(float f) { uint32_t v; std::memcpy(&v, &f, 4); return v; }\n}\n";
+  o << "extern \"C\" uint32_t vkm_mask8(const float* q, float margin, uint32_t required, const float* boxes, int nboxes, const float* balls, int nballs) {\n";
+  for(size_t j = 0; j < dof; j++) {
+    o << "  const v8f q" << j << " = {";
+    for(int lane = 0; lane < 8; lane++) o << (lane ? ", " : "") << "q[" << lane * static_cast<int>(dof) + static_cast<int>(j) << "]";
+    o << "};\n";
+  }
+  std::set<int> revolute;
+  for(int s = 0; s < ns; s++)
+    if(r.step_meta[static_cast<size_t>(s * 4 + 2)] == 1) revolute.insert(r.step_meta[static_cast<size_t>(s * 4 + 3)]);
+  for(int j : revolute) o << "  v8f sn" << j << ", cs" << j << ";\n  sincos8(q" << j << ", &sn" << j << ", &cs" << j << ");\n";
+  std::set<int> links;
+  for(int s = 0; s < ns; s++) links.insert(r.step_meta[static_cast<size_t>(s * 4 + 1)]);
+  for(int l : links) o << "  v8f R" << l << "[9], P" << l << "[3];\n";
+  for(int g = 0; g < r.num_groups; g++) o << "  v8f Gx" << g << ", Gy" << g << ", Gz" << g << ";\n";
+  o << "  v8f SX[" << std::max(r.num_spheres, 1) << "], SY[" << std::max(r.num_spheres, 1) << "], SZ[" << std::max(r.num_spheres, 1) << "];\n";
+  for(int c = 0; c < r.num_clusters; c++) o << "  v8f Cx" << c << ", Cy" << c << ", Cz" << c << ";\n";
+  auto xf = [&](int link, float x, float y, float z, const std::string& ox, const std::string& oy, const std::string& oz) {
+    const std::string R = "R" + std::to_string(link), P = "P" + std::to_string(link);
+    return ox + " = " + R + "[0] * " + litf(x) + " + " + R + "[1] * " + litf(y) + " + " + R + "[2] * " + litf(z) + " + " + P + "[0];\n" +
+           oy + " = " + R + "[3] * " + litf(x) + " + " + R + "[4] * " + litf(y) + " + " + R + "[5] * " + litf(z) + " + " + P + "[1];\n" +
+           oz + " = " + R + "[6] * " + litf(x) + " + " + R + "[7] * " + litf(y) + " + " + R + "[8] * " + litf(z) + " + " + P + "[2];\n";
+  };
+  for(int s = 0; s < ns; s++) {
+    const int* m   = &r.step_meta[static_cast<size_t>(s * 4)];
+    const float* d = &r.step_data[static_cast<size_t>(s * 16)];
+    const int pa = m[0], ch = m[1], type = m[2], joint = m[3];
+    const int grp = bits_to_int(d[3]);
+    o << "  {\n";
+    if(type == 3) {
+      for(int k = 0; k < 9; k++) o << "    R" << ch << "[" << k << "] = v8f{} + " << (k % 4 == 0 ? "1.0f" : "0.0f") << ";\n";
+      for(int k = 0; k < 3; k++) o << "    P" << ch << "[" << k << "] = v8f{};\n";
+    } else {
+      const float ro[9] = {d[4], d[5], d[6], d[8], d[9], d[10], d[12], d[13], d[14]};
+      const float to[3] = {d[7], d[11], d[15]};
+      o << "    v8f mm[9];\n";
+      if(type == 1) {
+        const float ax = d[0], ay = d[1], az = d[2];
+        const std::string sn = "sn" + std::to_string(joint), cs = "cs" + std::to_string(joint);
+        o << "    const v8f tt = 1.0f - " << cs << ";\n    v8f rj[9];\n";
+        const std::string rj[9] = {cs + " + tt * " + litf(ax * ax),         "tt * " + litf(ax * ay) + " - " + sn + " * " + litf(az), "tt * " + litf(ax * az) + " + " + sn + " * " + litf(ay),
+                                   "tt * " + litf(ay * ax) + " + " + sn + " * " + litf(az), cs + " + tt * " + litf(ay * ay),         "tt * " + litf(ay * az) + " - " + sn + " * " + litf(ax),
+                                   "tt * " + litf(az * ax) + " - " + sn + " * " + litf(ay), "tt * " + litf(az * ay) + " + " + sn + " * " + litf(ax), cs + " + tt * " + litf(az * az)};
+        for(int k = 0; k < 9; k++) o << "    rj[" << k << "] = " << rj[k] << ";\n";
+        for(int i = 0; i < 3; i++)
+          for(int j = 0; j < 3; j++)
+            o << "    mm[" << i * 3 + j << "] = rj[" << j << "] * " << litf(ro[i * 3]) << " + rj[" << 3 + j << "] * " << litf(ro[i * 3 + 1]) << " + rj[" << 6 + j << "] * " << litf(ro[i * 3 + 2]) << ";\n";
+      } else {
+        for(int i = 0; i < 9; i++) o << "    mm[" << i << "] = v8f{} + " << litf(ro[i]) << ";\n";
+      }
+      o << "    v8f t[3] = {v8f{} + " << litf(to[0]) << ", v8f{} + " << litf(to[1]) << ", v8f{} + " << litf(to[2]) << "};\n";
+      if(type == 2)
+        for(int k = 0; k < 3; k++) o << "    t[" << k << "] += q" << joint << " * " << litf(d[k]) << ";\n";
+      for(int i = 0; i < 3; i++)
+        for(int j = 0; j < 3; j++)
+          o << "    R" << ch << "[" << i * 3 + j << "] = R" << pa << "[" << i * 3 << "] * mm[" << j << "] + R" << pa << "[" << i * 3 + 1 << "] * mm[" << 3 + j << "] + R" << pa << "[" << i * 3 + 2 << "] * mm[" << 6 + j << "];\n";
+      for(int i = 0; i < 3; i++)
+        o << "    P" << ch << "[" << i << "] = P" << pa << "[" << i << "] + R" << pa << "[" << i * 3 << "] * t[0] + R" << pa << "[" << i * 3 + 1 << "] * t[1] + R" << pa << "[" << i * 3 + 2 << "] * t[2];\n";
+    }
+    if(grp >= 0) {
+      const float* gb = &r.group_bs[static_cast<size_t>(grp * 4)];
+      o << xf(ch, gb[0], gb[1], gb[2], "    Gx" + std::to_string(grp), "    Gy" + std::to_string(grp), "    Gz" + std::to_string(grp));
+      const int first = r.group_meta[static_cast<size_t>(grp * 4)], count = r.group_meta[static_cast<size_t>(grp * 4 + 1)];
+      for(int c = first; c < first + count; c++) {
+        const float* cb = &r.cluster_bs[static_cast<size_t>(c * 4)];
+        o << xf(ch, cb[0], cb[1], cb[2], "    Cx" + std::to_string(c), "    Cy" + std::to_string(c), "    Cz" + std::to_string(c));
+        const int sb2 = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc2 = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
+        for(int i = sb2; i < sb2 + sc2; i++) {
+          const float* sp = &r.spheres[static_cast<size_t>(i * 4)];
+          o << xf(ch, sp[0], sp[1], sp[2], "    SX[" + std::to_string(i) + "]", "    SY[" + std::to_string(i) + "]", "    SZ[" + std::to_string(i) + "]");
+        }
+      }
+    }
+    o << "  }\n";
+  }
+
+  // 球iの世界座標を宣言する(リンク姿勢はレジスタ/スタックにあるので必要な箇所でその場計算)
+  auto sphere_decl = [&](int /*cluster*/, int i, const std::string& n) {
+    return "const v8f& " + n + "x = SX[" + std::to_string(i) + "]; const v8f& " + n + "y = SY[" + std::to_string(i) + "]; const v8f& " + n + "z = SZ[" + std::to_string(i) + "];\n";
+  };
+  auto sphere_r = [&](int i) { return r.spheres[static_cast<size_t>(i * 4 + 3)]; };
+
+  o << "  uint32_t alive = 0xFFu;\n";
+  o << "  const auto dead = [required](uint32_t a) { return required ? (a & required) != required : a == 0u; };\n";
+  // 直方体: 箱はベースからの最短距離の昇順(B[7])。グループ境界球の「原点からの距離+半径」より遠い箱に当たったらそのグループの残りの箱は飛ばす(VAMPと同じ)
+  for(int g = 0; g < r.num_groups; g++) {
+    const float rad = r.group_bs[static_cast<size_t>(g * 4 + 3)];
+    o << "  {\n    const float rr = " << litf(rad) << " + margin;\n    const v8f ext = sqrt8(Gx" << g << " * Gx" << g << " + Gy" << g << " * Gy" << g << " + Gz" << g << " * Gz" << g << ") + rr;\n";
+    o << "    for(int b = 0; b < nboxes; b++) {\n      const float* B = boxes + 24 * b;\n";
+    o << "      if(!(movemask(ext >= B[7]) & alive)) break;\n      if((bits(B[3]) >> " << g << ") & 1u) continue;\n";
+    o << "      if(movemask((absf(Gx" << g << " - B[0]) <= B[20] + rr) & (absf(Gy" << g << " - B[1]) <= B[21] + rr) & (absf(Gz" << g << " - B[2]) <= B[22] + rr)) & alive) {\n";
+    const int first = r.group_meta[static_cast<size_t>(g * 4)], count = r.group_meta[static_cast<size_t>(g * 4 + 1)];
+    for(int c = first; c < first + count; c++) {
+      const float rc = r.cluster_bs[static_cast<size_t>(c * 4 + 3)];
+      o << "        { const float rc = " << litf(rc) << " + margin; if(movemask(bsq(B, Cx" << c << ", Cy" << c << ", Cz" << c << ") <= rc * rc) & alive) {\n";
+      const int sb = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
+      for(int i = sb; i < sb + sc; i++)
+        o << "          { " << sphere_decl(c, i, "s") << "const float q2 = " << litf(sphere_r(i)) << " + margin; alive &= ~movemask(bsq(B, sx, sy, sz) <= q2 * q2); }\n";
+      o << "          if(dead(alive)) return 0;\n        } }\n";
+    }
+    o << "      }\n    }\n  }\n";
+  }
+  // 球障害物
+  o << "  for(int b = 0; b < nballs; b++) {\n    const float* L = balls + 8 * b;\n    const uint32_t allow = bits(L[4]);\n";
+  for(int c = 0; c < r.num_clusters; c++) {
+    const int grpc = r.cluster_meta[static_cast<size_t>(c * 4 + 3)];
+    o << "    if(!((allow >> " << grpc << ") & 1u)) {\n";
+    const int sb = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
+    for(int i = sb; i < sb + sc; i++)
+      o << "      { " << sphere_decl(c, i, "s") << "const v8f dx = sx - L[0], dy = sy - L[1], dz = sz - L[2]; const float q2 = " << litf(sphere_r(i)) << " + L[3] + margin; alive &= ~movemask(dx * dx + dy * dy + dz * dz <= q2 * q2); }\n";
+    o << "      if(dead(alive)) return 0;\n    }\n";
+  }
+  o << "  }\n";
+  // 自己衝突(リンクペアは静的)
+  for(int g = 0; g < r.num_groups; g++) {
+    const int mask = r.pairs[static_cast<size_t>(g)];
+    for(int h = g + 1; h < r.num_groups; h++) {
+      if(!((mask >> h) & 1)) continue;
+      const float rr = r.group_bs[static_cast<size_t>(g * 4 + 3)] + r.group_bs[static_cast<size_t>(h * 4 + 3)];
+      o << "  { const v8f dx = Gx" << g << " - Gx" << h << ", dy = Gy" << g << " - Gy" << h << ", dz = Gz" << g << " - Gz" << h << "; const float rr = " << litf(rr) << " + 2.0f * margin;\n";
+      o << "    if(movemask(dx * dx + dy * dy + dz * dz <= rr * rr) & alive) {\n";
+      const int fa = r.group_meta[static_cast<size_t>(g * 4)], na = r.group_meta[static_cast<size_t>(g * 4 + 1)];
+      const int fb = r.group_meta[static_cast<size_t>(h * 4)], nb = r.group_meta[static_cast<size_t>(h * 4 + 1)];
+      for(int ca = fa; ca < fa + na; ca++)
+        for(int cb = fb; cb < fb + nb; cb++) {
+          const float rc = r.cluster_bs[static_cast<size_t>(ca * 4 + 3)] + r.cluster_bs[static_cast<size_t>(cb * 4 + 3)];
+          o << "      { const v8f ex = Cx" << ca << " - Cx" << cb << ", ey = Cy" << ca << " - Cy" << cb << ", ez = Cz" << ca << " - Cz" << cb << "; const float q = " << litf(rc) << " + 2.0f * margin;\n";
+          o << "        if(movemask(ex * ex + ey * ey + ez * ez <= q * q) & alive) {\n";
+          const int sba = r.cluster_meta[static_cast<size_t>(ca * 4 + 1)], sca = r.cluster_meta[static_cast<size_t>(ca * 4 + 2)];
+          const int sbb = r.cluster_meta[static_cast<size_t>(cb * 4 + 1)], scb = r.cluster_meta[static_cast<size_t>(cb * 4 + 2)];
+          for(int i = sba; i < sba + sca; i++) {
+            o << "          { " << sphere_decl(ca, i, "a");
+            for(int jj = sbb; jj < sbb + scb; jj++)
+              o << "            { " << sphere_decl(cb, jj, "b") << "const v8f wx = ax - bx, wy = ay - by, wz = az - bz; const float z2 = " << litf(sphere_r(i) + sphere_r(jj)) << " + 2.0f * margin; alive &= ~movemask(wx * wx + wy * wy + wz * wz <= z2 * z2); }\n";
+            o << "          }\n";
+          }
+          o << "          if(dead(alive)) return 0;\n        } }\n";
+        }
+      o << "    } }\n";
+    }
+  }
+  o << "  return alive;\n}\n";
+  return o.str();
+}
+
+CpuMask8Fn load_cpu_kernel(const GpuRobotData& robot, size_t dof) {
+  if(std::getenv("VKMOTION_NO_CODEGEN")) return nullptr;
+  if(!file_exists(VKMOTION_CXX)) return nullptr;
+  const std::string gen = generate_robot_cpp(robot, dof);
+  uint64_t h            = fnv1a(gen);
+  h                     = fnv1a(read_text(std::string(VKMOTION_SOURCE_DIR) + "/vkmotion/simd8.hpp"), h);
+  h                     = fnv1a(VKMOTION_JIT_FLAGS, h);
+  char hex[32];
+  std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(h));
+  const std::string dir = cache_dir();
+  if(!mkdir_p(dir)) return nullptr;
+  const std::string so = dir + "/cpu_kernel." + hex + ".so";
+  if(!file_exists(so)) {
+    const std::string src = dir + "/cpu_kernel." + hex + ".cpp";
+    {
+      std::ofstream f(src);
+      f << gen;
+      if(!f) return nullptr;
+    }
+    const std::string tmp = so + ".tmp" + std::to_string(::getpid());
+    const std::string cmd = std::string("\"") + VKMOTION_CXX + "\" " + VKMOTION_JIT_FLAGS + " -I\"" + VKMOTION_SOURCE_DIR + "\" \"" + src + "\" -o \"" + tmp + "\" 2>&1";
+    FILE* p               = ::popen(cmd.c_str(), "r");
+    if(!p) return nullptr;
+    std::string log;
+    char buf[512];
+    while(std::fgets(buf, sizeof(buf), p)) log += buf;
+    const int rc = ::pclose(p);
+    if(rc != 0 || !file_exists(tmp)) {
+      if(std::getenv("VKM_DEBUG")) std::fprintf(stderr, "cpu kernel compile failed (%d): %s\n", rc, log.c_str());
+      ::unlink(tmp.c_str());
+      return nullptr;
+    }
+    if(std::rename(tmp.c_str(), so.c_str()) != 0) {
+      ::unlink(tmp.c_str());
+      if(!file_exists(so)) return nullptr;
+    }
+  }
+  void* handle = ::dlopen(so.c_str(), RTLD_NOW | RTLD_LOCAL);  // プロセス終了までアンロードしない
+  if(!handle) return nullptr;
+  return reinterpret_cast<CpuMask8Fn>(::dlsym(handle, "vkm_mask8"));
 }
 
 }  // namespace vkmotion

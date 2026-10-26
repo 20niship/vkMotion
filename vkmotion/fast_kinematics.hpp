@@ -4,14 +4,12 @@
 #include <string>
 #include <vector>
 
+#include "simd8.hpp"
 #include "urdf_loader.hpp"
 
 namespace vkmotion {
 
 // 8コンフィグを同時に扱うSIMDベクトル(GCC/Clang vector extension。AVX2が無ければコンパイラが分割して実行)。
-typedef float v8f __attribute__((vector_size(32), aligned(32)));
-typedef int v8i __attribute__((vector_size(32), aligned(32)));
-constexpr int kSimdWidth = 8;
 
 // 行優先3x3回転 + 並進。FKの内側ループでヒープ確保や文字列比較をしないための素のPOD。
 struct Frame {

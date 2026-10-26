@@ -7,6 +7,7 @@
 
 #include "allowed_collision_matrix.hpp"
 #include "fast_kinematics.hpp"
+#include "simd8.hpp"
 #include "robot_config.hpp"
 #include "world_config.hpp"
 
@@ -74,6 +75,8 @@ class FastCollision {
   // GPU用のフラットデータ。ロボットがGPU上限(dof<=16, link<=32, group<=16, sphere<=96, cluster<=40, step<=24, pair<=192, box<=32, ball<=8)を超える、または世界がSIMD非対応ならfalse。
   bool pack_gpu_robot(GpuRobotData& out) const;
   void pack_gpu_world(GpuWorldData& out) const;
+  // ロボット専用CPUカーネルを使っているか
+  bool jit_active() const { return jit_ != nullptr; }
   bool gpu_compatible() const { return simd_supported() && boxes_.size() <= 32 && balls_.size() <= 8; }  // shaders/include/robot_collision_common.glsl のshared memory上限
 
   // 並列バッチ判定。out[i]=1:衝突なし。threads<=1なら呼び出しスレッドのみ。
@@ -133,6 +136,11 @@ class FastCollision {
   float r_min_      = 0.0f;
   std::vector<float> joint_reach_;
   float motion_step_ = 0.05f;
+
+  // ロボット専用に生成・コンパイルしたカーネル(gpu_codegen.cpp)。コンパイラが無い等でnullptrなら汎用のmask8_implを使う。
+  uint32_t (*jit_)(const float*, float, uint32_t, const float*, int, const float*, int) = nullptr;
+  std::vector<float> jit_boxes_, jit_balls_;
+  int jit_num_boxes_ = 0, jit_num_balls_ = 0;
 };
 
 }  // namespace vkmotion
