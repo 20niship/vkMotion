@@ -4,6 +4,7 @@
 #include <cmath>
 #include <random>
 
+#include "fast_planner.hpp"
 #include "robot_world.hpp"
 
 namespace vkmotion {
@@ -105,16 +106,30 @@ int try_connect(std::vector<Node>& tree_b, const std::vector<float>& target, con
 
 }  // namespace
 
-RrtConnectPlanner::RrtConnectPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan)
-    : robot_config_(robot_config), world_config_(world_config), use_vulkan_(use_vulkan) {}
+RrtConnectPlanner::RrtConnectPlanner(cutil::Ref<RobotConfig> robot_config, cutil::Ref<WorldConfig> world_config, bool use_vulkan, AllowedCollisionMatrix acm)
+    : robot_config_(robot_config), world_config_(world_config), use_vulkan_(use_vulkan), acm_(std::move(acm)) {}
 
 RrtConnectResult RrtConnectPlanner::plan(const JointState& start, const JointState& goal, const RrtConnectConfig& config) {
   RrtConnectResult result;
-  RobotWorld rw(RobotWorldConfig{robot_config_, world_config_, use_vulkan_});
+  RobotWorld rw(RobotWorldConfig{robot_config_, world_config_, use_vulkan_, acm_});
   const RobotConfig& robot = *robot_config_;
 
   if(!rw.is_collision_free(start) || !rw.is_collision_free(goal)) {
     result.status = "start or goal state is in collision";
+    return result;
+  }
+
+  if(const FastCollision* fc = rw.fast_collision()) {
+    FastRrtSettings st;
+    st.seed = std::random_device{}();
+    FastRrtResult r = fast_rrt_connect(*fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, {goal.position}, st);
+    if(r.success) {
+      result.success = true;
+      for(auto& q : r.path) result.trajectory.push_back(JointState{std::move(q), {}});
+      result.status = "success";
+    } else {
+      result.status = "RRT-Connect failed to find a path within max_iterations";
+    }
     return result;
   }
 

@@ -34,4 +34,35 @@ class VkComputePipeline {
   VkFence fence_       = VK_NULL_HANDLE;
 };
 
+// 同じデスクリプタセット/push constantを共有する複数のcompute shaderを、1つのコマンドバッファに並べて1回のsubmitで流す。
+// 反復アルゴリズムの各ラウンドをdispatchにして、ラウンド間のCPU往復を無くすため(dispatch間はGPU上のbarrierだけ)。
+class VkComputeSequence {
+ public:
+  VkComputeSequence(VkContext& ctx, const std::vector<std::string>& spv_paths, uint32_t num_storage_bindings, uint32_t push_constant_bytes);
+  ~VkComputeSequence();
+  VkComputeSequence(const VkComputeSequence&)            = delete;
+  VkComputeSequence& operator=(const VkComputeSequence&) = delete;
+
+  void update_bindings(const std::vector<VkDescriptorBufferInfo>& buffers);
+  // コマンドバッファを開き、デスクリプタセットとpush constantを設定する(以降のdispatchすべてに効く)
+  void begin(const void* push_constants, uint32_t push_constant_bytes);
+  void dispatch(size_t pipeline_index, uint32_t group_count_x);
+  void dispatch_indirect(size_t pipeline_index, VkBuffer args, VkDeviceSize offset);
+  void dispatch(size_t pipeline_index, uint32_t group_count_x, uint32_t group_count_y);
+  // 直前までのshader書き込みを、次のdispatch(間接引数の読み出しを含む)から見えるようにする
+  void barrier();
+  void submit_and_wait();
+
+ private:
+  VkContext& ctx_;
+  VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+  std::vector<VkShaderModule> modules_;
+  std::vector<VkPipeline> pipelines_;
+  VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+  VkDescriptorSet descriptor_set_   = VK_NULL_HANDLE;
+  VkCommandBuffer cmd_              = VK_NULL_HANDLE;
+  VkFence fence_                    = VK_NULL_HANDLE;
+};
+
 }  // namespace vkmotion

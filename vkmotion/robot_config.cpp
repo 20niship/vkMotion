@@ -59,6 +59,7 @@ cutil::Ref<RobotConfig> RobotConfig::from_file(const std::string& urdf_path, con
   cutil::Ref<RobotConfig> cfg = cutil::make_ref<RobotConfig>();
 
   cfg->model_       = load_urdf(urdf_path);
+  cfg->kin_         = std::make_shared<CompiledKinematics>(cfg->model_);
   cfg->joint_names_ = active_joint_names(cfg->model_);
   for(const auto& name : cfg->joint_names_) {
     for(const auto& j : cfg->model_.joints) {
@@ -78,7 +79,20 @@ cutil::Ref<RobotConfig> RobotConfig::from_file(const std::string& urdf_path, con
 }
 
 std::vector<cutil::Mat4f> RobotConfig::forward_kinematics(const JointState& joint_state) const {
-  return vkmotion::forward_kinematics(model_, joint_state.position);
+  const size_t n = kin_->num_links();
+  std::vector<Frame> frames(n);
+  // 関節数がqより多いときは参照実装と同じく不足分を0として扱う
+  std::vector<float> q = joint_state.position;
+  q.resize(kin_->dof(), 0.0f);
+  kin_->forward(q.data(), frames.data());
+  std::vector<cutil::Mat4f> out(n, cutil::Mat4f::identity());
+  for(size_t l = 0; l < n; l++) {
+    for(int i = 0; i < 3; i++) {
+      for(int j = 0; j < 3; j++) out[l](i, j) = frames[l].r[i * 3 + j];
+      out[l](i, 3) = frames[l].p[i];
+    }
+  }
+  return out;
 }
 
 std::vector<CollisionSphere> RobotConfig::collision_spheres_world(const JointState& joint_state) const {

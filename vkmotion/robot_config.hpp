@@ -2,9 +2,11 @@
 
 #include <cutil/mat.hpp>
 #include <cutil/ref.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "fast_kinematics.hpp"
 #include "types.hpp"
 #include "urdf_loader.hpp"
 
@@ -26,9 +28,12 @@ class RobotConfig {
   const std::vector<CollisionSphere>& collision_spheres_local() const { return collision_spheres_; }
 
   const UrdfModel& urdf_model() const { return model_; }
+  // ロード時にコンパイル済みのFK(hot path用)。forward_kinematics()もこれで計算する。
+  const CompiledKinematics& compiled_kinematics() const { return *kin_; }
 
  private:
   UrdfModel model_;
+  std::shared_ptr<CompiledKinematics> kin_;
   std::vector<std::string> joint_names_;
   std::vector<float> limits_lower_;
   std::vector<float> limits_upper_;
