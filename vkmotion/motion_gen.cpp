@@ -394,7 +394,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
     used_margin = margin;
     // GPU探索とCPU探索の競争: 簡単な問題はCPUだけで先に解く(gpu_handoff_s)。解けなければGPU探索を裏で走らせたままCPUの探索を続け、先に解けた方を採る。
     // (submitが数十µsで戻るので、GPUの固定費はCPUの探索と重なる。GPUが常に温まるのでクロックが落ちにくい副次効果もある)
-    const bool race = allow_gpu && config_.gpu_search && threads == 1 && robot_world().gpu_rrt_available();
+    const bool race = allow_gpu && config_.gpu_search && robot_world().gpu_rrt_available();
     bool gpu_running = false, gpu_solved = false;
     auto gpu_poll    = [&]() {
       if(!gpu_running) return;
@@ -432,7 +432,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       gs.seed        = static_cast<uint32_t>(seed);
       gpu_running    = robot_world().gpu_rrt_async_begin(start.position, goal_q, gs);
     }
-    if(threads > 1) {
+    if(threads > 1 && !race) {
       // 大半の問題は数msで解けるので、スレッド起動のオーバーヘッドを払う前に1スレッドで短く試す。
       FastRrtSettings quick;
       quick.margin      = margin;
@@ -470,6 +470,21 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
             if(r.success) cancel.store(true);
             return r;
           }));
+        }
+        // スレッドの完了を待つ間に、GPU探索が先に解けたか調べる(Vulkanはこのスレッドからしか触らない)
+        while(true) {
+          bool all_ready = true;
+          for(auto& f : futs)
+            if(f.wait_for(std::chrono::seconds(0)) != std::future_status::ready) all_ready = false;
+          if(all_ready) break;
+          if(gpu_running) {
+            gpu_poll();
+            if(gpu_solved) {
+              cancel.store(true);
+              break;
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::microseconds(20));
         }
         for(auto& f : futs) {
           FastRrtResult r = f.get();

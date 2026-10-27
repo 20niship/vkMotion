@@ -14,7 +14,7 @@ import vamp.transformations as T
 from common import DATA, RESULTS, load_samples
 from prepare import make_vamp_env, quat_to_wxyz
 
-ORDER = ["vamp", "curobo", "vkmotion-vulkan", "vkmotion-cpu", "vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-batch"]
+ORDER = ["vamp", "curobo", "vkmotion-vulkan", "vkmotion-cpu", "vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-mt", "vkmotion-gpu-batch"]
 LABEL = {
     "vamp": "VAMP (CPU SIMD, 1 thread)",
     "curobo": "cuRobo v2 (GPU)",
@@ -22,10 +22,11 @@ LABEL = {
     "vkmotion-cpu": "vkMotion (CPU, 1 thread)",
     "vkmotion-cpu-mt": "vkMotion (CPU, 8 threads)",
     "vkmotion-gpu": "vkMotion (GPU探索)",
+    "vkmotion-gpu-mt": "vkMotion (GPU探索 + CPU 8スレッド)",
     "vkmotion-gpu-batch": "vkMotion (GPUバッチ32, 1問あたり)",
 }
 PLAN_SKIP = {"vkmotion-vulkan"}  # 計画ループの衝突判定は小バッチ(CPU SIMD)なのでVulkan有効でも-cpuと同一経路
-KERNEL_ONCE = {"vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-batch"}  # FK/衝突判定スループットは-cpuと同じ計測なので重複させない
+KERNEL_ONCE = {"vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-mt", "vkmotion-gpu-batch"}  # FK/衝突判定スループットは-cpuと同じ計測なので重複させない
 
 
 def pct(x, p):
@@ -205,8 +206,8 @@ def section_before_after(now, base):
 
 NOTES = """
 - **VAMPとの比較(正直なところ)**: 関節ゴールの中央値はvkMotionが約0.2ms、VAMPが約0.35msで、1.7倍ほど速いが「数倍」ではない。簡単な問題が多い`box`/`table_*`では約2倍速い。
-  裾はVAMPが良い(VAMP p95≈0.9ms/p99≈1.6〜2.2ms、vkMotion GPU探索はp95≈3.0ms/p99≈3.9ms)。難しいシーン`cage`は、vkMotionの中央値が約1.5ms、VAMPが約0.7ms。
-  全210問の最大は、vkMotion GPU探索が約4.4ms(以前は20ms近く)、VAMPが約5.5ms。姿勢ゴールを含めても最大は約10ms。
+  裾はVAMPが良い(VAMP p95≈0.9ms/p99≈1.6〜2.2ms、vkMotion GPU探索はp95≈2.8ms/p99≈3.6ms、CPU 8スレッドと併用でp95≈1.9ms/p99≈3.5ms)。難しいシーン`cage`は、vkMotionの中央値が約1.5ms、VAMPが約0.7ms。
+  全210問の最大は、vkMotion GPU探索が約4.0ms(以前は20ms近く)、VAMPが約5.5ms。姿勢ゴールを含めても最大は約10ms。
   VAMPの時間は`time_ms`=1回目の実行(plan+simplify)で、`time_ms_median3`は3回の中央値(以前はこちらを使っていたため裾が隠れていた)。
 - **今回効いたこと**: (1) 経路探索の木のバッファがホスト(システム)メモリに置かれていてノードの読み書きがPCIe越しだった。デバイスメモリに置いたところ、GPU探索の難しい問題が数倍速くなった(これが最大の改善)。
   (2) 最近傍探索を8ノードずつのSIMDにした(CPU)、(3) ロボット専用のSIMD/GPUカーネルを実行時に生成(`gpu_codegen`、FK・境界球・自己衝突ペアをリテラルに展開)、

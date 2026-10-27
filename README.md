@@ -99,7 +99,7 @@ MotionGenResult r = motion_gen.plan_single_js(start, JointState{.position = {1.5
 ```cpp
 cfg.gpu_search       = true;    // 既定でオン。大域探索(RRT-Connect)をGPUでも行う。GPUが無ければ自動でCPUのみ
 cfg.gpu_handoff_s    = 0.0001f; // まずCPUだけでこの秒数試し、解けなければGPU探索を裏で走らせ始める(以降はCPUの探索も続けて、先に解けた方を採る)
-cfg.num_threads      = 1;       // CPU側の探索を独立シードで並列起動する本数(裾を短くしたいとき8など)
+cfg.num_threads      = 1;       // CPU側の探索を独立シードで並列起動する本数(裾を短くしたいとき8など。GPU探索とも競争する)
 cfg.collision_margin = 0.005f;  // 経路の内部点に持たせる安全余裕[m]
 cfg.seed             = 1234;    // 0なら非決定的、それ以外なら再現可能
 ```

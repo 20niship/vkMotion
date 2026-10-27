@@ -55,6 +55,8 @@ runs.sort()
 print("GPU探索 3回のp99[ms]:", [round(r[0], 2) for r in runs], "-> 採用:", runs[1][1])
 shutil.copy(runs[1][1], "bench/results/vkmotion-gpu.json")
 PYEOF
+  # GPU探索 + CPU 8スレッドを競わせる構成(裾が最も短い。CPUコアを使う)
+  ./build-bench/bench/bench_vkmotion bench/data bench/results/vkmotion-gpu-mt.json --backend vulkan --limit "$LIMIT" --threads 8 --skip fkcol,ik
   # 同じ問題をバッチ(32件ずつ、問題ごとに別の世界)でまとめてGPU探索。time_msは「バッチ時間/件数」
   ./build-bench/bench/bench_vkmotion bench/data bench/results/vkmotion-gpu-batch.json --backend vulkan --limit "$LIMIT" --batch 32 --skip fkcol,ik,pose
 fi
