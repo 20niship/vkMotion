@@ -254,6 +254,7 @@ struct RrtThreadPool::Impl {
   std::atomic<int> remaining{0};
   std::atomic<bool> stop{false};
   const std::function<void(int)>* fn = nullptr;
+  std::atomic<int> spin_us{300};
 };
 
 RrtThreadPool::RrtThreadPool(int participants) : participants_(std::max(1, participants)), impl_(new Impl()) {
@@ -261,8 +262,9 @@ RrtThreadPool::RrtThreadPool(int participants) : participants_(std::max(1, parti
     impl_->threads.emplace_back([this, t] {
       uint32_t seen = 0;
       while(true) {
-        // 短くスピンして新しい仕事を拾い、無ければfutexで眠る
-        for(int spin = 0; spin < 4000 && impl_->generation.load(std::memory_order_acquire) == seen && !impl_->stop.load(std::memory_order_relaxed); spin++) {
+        // 直前の仕事が終わってから spin_us の間はスピンして新しい仕事を拾い(起床の遅延をなくす)、それを過ぎたらfutexで眠る
+        const auto spin_until = std::chrono::steady_clock::now() + std::chrono::microseconds(impl_->spin_us.load(std::memory_order_relaxed));
+        while(impl_->generation.load(std::memory_order_acquire) == seen && !impl_->stop.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < spin_until) {
 #if defined(__x86_64__)
           __builtin_ia32_pause();
 #endif
@@ -285,6 +287,8 @@ RrtThreadPool::~RrtThreadPool() {
   for(auto& th : impl_->threads) th.join();
   delete impl_;
 }
+
+void RrtThreadPool::set_spin_us(int us) { impl_->spin_us.store(us); }
 
 void RrtThreadPool::run(const std::function<void(int)>& fn) {
   if(participants_ == 1) {

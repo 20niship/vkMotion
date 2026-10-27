@@ -46,6 +46,8 @@ class RrtThreadPool {
   RrtThreadPool& operator=(const RrtThreadPool&) = delete;
   int size() const { return participants_; }
   void run(const std::function<void(int)>& fn);
+  // 仕事が終わってから次の仕事を待ってスピンする時間(µs)。長いほど次のrunの起動が速いが、その間CPUを使う
+  void set_spin_us(int us);
 
  private:
   struct Impl;

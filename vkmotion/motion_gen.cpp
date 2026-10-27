@@ -294,6 +294,11 @@ RobotWorld& MotionGen::robot_world() {
 void MotionGen::warmup() {
   RobotWorld& rw = robot_world();
   rw.warmup();  // コンパイル済み衝突判定・Vulkanパイプラインの初回構築をここで済ませる
+  const int threads = config_.num_threads > 0 ? config_.num_threads : std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8);
+  if(threads > 1 && !rrt_pool_) {
+    rrt_pool_ = std::make_unique<RrtThreadPool>(threads);  // 探索スレッドを起こしておく
+    rrt_pool_->run([](int) {});
+  }
 }
 
 MotionGen::MotionGen(const MotionGenConfig& config) : config_(config) {}
@@ -432,16 +437,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       gs.seed        = static_cast<uint32_t>(seed);
       gpu_running    = robot_world().gpu_rrt_async_begin(start.position, goal_q, gs);
     }
-    if(threads > 1 && !race) {
-      // 大半の問題は数msで解けるので、スレッド起動のオーバーヘッドを払う前に1スレッドで短く試す。
-      FastRrtSettings quick;
-      quick.margin      = margin;
-      quick.motion_step = step;
-      quick.timeout_s   = std::max(config_.gpu_handoff_s, 0.0001f);
-      quick.seed        = seed ^ 0xA5A5A5A5ull;
-      rrt               = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, quick);
-      if(rrt.success) used_margin = rrt.margin;
-    }
+    // 複数スレッドのときは単スレッドで先に試さず、最初から共有木で並列に探す(スレッドは直前の計画後しばらくスピンして待っているので起動が速い)。
     // RRTは実行時間の分布が重い裾を持つ(数倍〜10倍遅い"運の悪い"シードがある)ので、短い制限時間で打ち切って別シードで再開する。
     // 制限時間は20msから試行ごとに2倍にして、本当に難しい問題でも総時間が(再開の無駄を含めても)2倍程度で済むようにする(以前の3msからの1.5倍では、10〜20msかかる問題が途中で何度も打ち切られていた)。
     // 余裕(margin)は、木が伸びないときだけ探索の途中で縮める(fast_rrt_connect)。
