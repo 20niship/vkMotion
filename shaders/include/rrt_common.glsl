@@ -1,10 +1,12 @@
 // GPU RRT-Connect(rrt_advance.comp / rrt_gpu.comp)の共通部: バッファ・push constant・ノードの詰め方。
-// 木はデバイスメモリ上の大きな配列で、全ワープが共有する(ラウンド=dispatchごとに、他ワープの追加分はスナップショット越しにしか見えない)。
+// 木はデバイスメモリ上の大きな配列で、同じ問題を担当する全ワープが共有する(ラウンド=dispatchごとに、他ワープの追加分はスナップショット越しにしか見えない)。
+// 複数の問題(それぞれ別の世界・start・goal)を1回のdispatchでまとめて解く(バッチ)。問題番号はdispatchのworkgroup IDで渡す。
+// 問題ごとに params / ctl / 木 / 結果 / 世界(箱・球) を別の領域に持つ。
 
-layout(std430, binding = 0) readonly buffer Params { float prm[]; };  // lower[8], upper[8], reach[8], start[8], goals[8*8]
-layout(std430, binding = 11) buffer Result { uint res[]; };           // 勝者の経路: [0]=点数 [1]=ラウンド, [4+k*8+j]=点k関節j
-layout(std430, binding = 12) buffer Ctl { uint ctl[]; };              // 制御ブロック(下のCTL_*)
-layout(std430, binding = 13) buffer Tree { uvec4 nd[]; };             // 木0(start側)が[0,CAP)、木1(goal側)が[CAP,2CAP)
+layout(std430, binding = 0) readonly buffer Params { float prm[]; };  // 問題ごとに PRM_STRIDE 個: lower[8], upper[8], reach[8], start[8], goals[8*8], 以降は整数のビット列(PRM_NGOALS..)
+layout(std430, binding = 11) buffer Result { uint res[]; };           // 問題ごとの勝者の経路: [0]=点数 [1]=ラウンド, [4+k*8+j]=点k関節j
+layout(std430, binding = 12) buffer Ctl { uint ctl[]; };              // 問題ごとの制御ブロック(CTL_STRIDE個、下のCTL_*)
+layout(std430, binding = 13) buffer Tree { uvec4 nd[]; };             // 問題pの木0(start側)が[(2p)CAP,(2p+1)CAP)、木1(goal側)がその次のCAP個
 
 layout(push_constant) uniform PushConstants {
   uint num_configs_unused;
@@ -30,8 +32,8 @@ layout(push_constant) uniform PushConstants {
 }
 pc;
 
-const uint CAP        = 16384;  // 1本の木のノード数上限
-const uint CAP_SOFT   = 14000; // これを超えたらラウンド境界で作り直す(根だけ残す)
+const uint CAP        = 4096;  // 1本の木のノード数上限(バッチで問題数が多くても木のメモリが収まるように)
+const uint CAP_SOFT   = 3500;  // これを超えたらラウンド境界で作り直す(根だけ残す)
 const uint MAXP       = 128;   // 返す経路の最大点数
 const uint CTL_CNT0   = 0;     // 木0のノード数(append用アトミックカウンタ)
 const uint CTL_CNT1   = 1;
@@ -42,12 +44,31 @@ const uint CTL_WIN    = 5;     // 勝ったワープ
 const uint CTL_ROUND  = 6;     // 次のラウンド番号
 const uint CTL_MARGIN = 7;     // 現在の余裕(floatのビット列)。木が伸びないとき 1/4 -> 0 と縮める
 const uint CTL_STAGE  = 12;    // 余裕を最後に縮めたラウンド
-const uint CTL_ARGS   = 8;     // 次のdispatchIndirect引数(x,y,z)
+const uint CTL_ARGS   = 8;     // 次のラウンドでこの問題に使うワープ数
+const uint CTL_STRIDE = 16;
+const uint PRM_STRIDE = 104;
+const uint PRM_NGOALS = 96;    // 以降は整数のビット列
+const uint PRM_NBOXES = 97;
+const uint PRM_NBALLS = 98;
+const uint PRM_SEED   = 99;
+const uint MAXB       = 32;    // 問題あたりの箱の上限(boxes[]は6 vec4/箱)
+const uint MAXBALL    = 8;     // 問題あたりの球の上限(balls[]は2 vec4/球)
+const uint RES_STRIDE = 4u + MAXP * 8u;
+
+uint g_pid, g_pb, g_cb;  // 担当する問題の番号 / params / ctl の先頭
+void init_problem(uint pid) {
+  g_pid = pid;
+  g_pb  = pid * PRM_STRIDE;
+  g_cb  = pid * CTL_STRIDE;
+}
+#define PRM(i) prm[g_pb + (i)]
+#define CTL(i) ctl[g_cb + (i)]
+#define NODE(t, i) nd[(g_pid * 2u + (t)) * CAP + (i)]
 
 float qlo[8], qstep[8], qinv[8];
 void init_quant() {
   for(uint j = 0; j < 8u; j++) {
-    float lo = prm[j], hi = prm[8u + j];
+    float lo = PRM(j), hi = PRM(8u + j);
     qlo[j]   = lo;
     qstep[j] = (hi - lo) / 65535.0;
     qinv[j]  = hi > lo ? 1.0 / (hi - lo) : 0.0;

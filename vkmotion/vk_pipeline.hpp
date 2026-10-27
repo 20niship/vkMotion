@@ -48,6 +48,7 @@ class VkComputeSequence {
   void begin(const void* push_constants, uint32_t push_constant_bytes);
   void dispatch(size_t pipeline_index, uint32_t group_count_x);
   void dispatch_indirect(size_t pipeline_index, VkBuffer args, VkDeviceSize offset);
+  void dispatch(size_t pipeline_index, uint32_t group_count_x, uint32_t group_count_y);
   // 直前までのshader書き込みを、次のdispatch(間接引数の読み出しを含む)から見えるようにする
   void barrier();
   void submit_and_wait();

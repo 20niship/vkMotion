@@ -241,6 +241,11 @@ void VkComputeSequence::dispatch(size_t pipeline_index, uint32_t group_count_x) 
   vkCmdDispatch(cmd_, group_count_x, 1, 1);
 }
 
+void VkComputeSequence::dispatch(size_t pipeline_index, uint32_t group_count_x, uint32_t group_count_y) {
+  vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_.at(pipeline_index));
+  vkCmdDispatch(cmd_, group_count_x, group_count_y, 1);
+}
+
 void VkComputeSequence::dispatch_indirect(size_t pipeline_index, VkBuffer args, VkDeviceSize offset) {
   vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_.at(pipeline_index));
   vkCmdDispatchIndirect(cmd_, args, offset);

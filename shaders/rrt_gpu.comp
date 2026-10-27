@@ -11,7 +11,7 @@
 // 全ワープが同じ木(start側とgoal側, デバイスメモリ上)を共有して非同期に伸ばす。
 // 1ワープの動き(=RRT-Connectの1反復):
 //   サンプル -> 最近傍(32レーンで分担) -> 辺の検査(辺上の補間点を32レーンに割り振り、各レーンが1点のFK+衝突判定) -> 木に追加 -> 相手の木へ貪欲に繋ぐ
-// 同じラウンド内に他ワープが追加したノードは見えない(ctl[CTL_SNAP*]未満だけ読む。ラウンド間でrrt_advance.compが更新し、dispatch間のbarrierで可視になる)。
+// 同じラウンド内に他ワープが追加したノードは見えない(CTL(CTL_SNAP*)未満だけ読む。ラウンド間でrrt_advance.compが更新し、dispatch間のbarrierで可視になる)。
 // ラウンドごとのワープ数は最初は少なく(簡単な問題を速く解く)、徐々に増える(難しい問題に全GPUを使う)。
 // 辺の検査点の決め方はvkmotion/fast_collision.cppのmotion_freeと同じ(Lipschitz上界で刻み数を決め、粗い分割から順)。変更時は両方そろえること。
 // 結果は呼び出し側(CPU)が独立に検証し直すので、ここは「解の候補を速く出す」役。直線で結べるかはCPU側で先に試している前提。
@@ -21,7 +21,12 @@ layout(local_size_x = 32) in;
 
 #include "include/rrt_common.glsl"
 float g_margin;
+uint g_nbox, g_nball, g_box_base, g_ball_base;
 #define MARGIN g_margin
+#define NUM_BOXES g_nbox
+#define NUM_BALLS g_nball
+#define BOX_BASE g_box_base
+#define BALL_BASE g_ball_base
 #include "include/robot_collision_common.glsl"
 
 uint rng_state;
@@ -35,8 +40,8 @@ float rnd() {
   return float(rng_state >> 8) * (1.0 / 16777216.0);
 }
 
-void load_node(uint t, uint i, out float q[8]) { unpack_node(nd[t * CAP + i], q); }
-int node_parent(uint t, uint i) { return int(nd[t * CAP + i].w >> 16) - 2; }
+void load_node(uint t, uint i, out float q[8]) { unpack_node(NODE(t, i), q); }
+int node_parent(uint t, uint i) { return int(NODE(t, i).w >> 16) - 2; }
 
 float EA[8], EB[8];
 
@@ -55,7 +60,7 @@ int interior_index(int p, int n) {
 // EA->EB の直線補間が衝突しないか(ワープの32レーンで協調。全レーンが同じ結果を返す)。include_end なら EB も検査(margin込み)。端点EAは検査済みの前提。
 bool edge_free_warp(bool include_end) {
   float disp = 0.0;
-  for(uint j = 0; j < pc.dof; j++) disp += abs(EB[j] - EA[j]) * prm[16u + j];
+  for(uint j = 0; j < pc.dof; j++) disp += abs(EB[j] - EA[j]) * PRM(16u + j);
   const int n     = max(1, int(ceil(disp / pc.motion_step)));
   const int total = (n - 1) + (include_end ? 1 : 0);
   const int lane  = int(gl_SubgroupInvocationID);
@@ -78,7 +83,7 @@ int nearest_warp(uint t, uint c, float q[8]) {
   float bd = 1e30;
   uint bi  = 0u;
   for(uint i = gl_SubgroupInvocationID; i < c; i += 32u) {
-    uvec4 w = nd[t * CAP + i];
+    uvec4 w = NODE(t, i);
     float d = 0.0, e;
     e = dec(w.x & 0xFFFFu, 0u) - q[0]; d += e * e;
     e = dec(w.x >> 16, 1u) - q[1]; d += e * e;
@@ -118,10 +123,10 @@ bool steer(float from[8], float target[8], out float outq[8]) {
 // ノードを木tの末尾に追加して index を返す(全レーンに同じ値)。容量オーバーなら -1。
 int append_node(uint t, float q[8], int parent) {
   uint idx = 0u;
-  if(gl_SubgroupInvocationID == 0u) idx = atomicAdd(ctl[CTL_CNT0 + t], 1u);
+  if(gl_SubgroupInvocationID == 0u) idx = atomicAdd(CTL(CTL_CNT0 + t), 1u);
   idx = subgroupShuffle(idx, 0u);
   if(idx >= CAP) return -1;
-  if(gl_SubgroupInvocationID == 0u) nd[t * CAP + idx] = pack_node(q, parent);
+  if(gl_SubgroupInvocationID == 0u) NODE(t, idx) = pack_node(q, parent);
   return int(idx);
 }
 
@@ -131,7 +136,7 @@ void write_point(uint base, uint k, float q[8]) {
 
 // 経路を書く(ワープの1レーンだけが呼ぶ)。start側の根→idx_s, idx_g→goal側の根(idx_sとidx_gは同じ配置)。
 void write_path(uint iters, int idx_s, int idx_g) {
-  uint base = 0u;
+  uint base = g_pid * RES_STRIDE;
   uint ns = 0u, ng = 0u;
   for(int i = idx_s; i >= 0; i = node_parent(0u, uint(i))) ns++;
   for(int i = idx_g; i >= 0; i = node_parent(1u, uint(i))) ng++;
@@ -161,8 +166,8 @@ void write_path(uint iters, int idx_s, int idx_g) {
 bool warp_iteration(uint a, uint round) {
   const uint b = 1u - a;
   float qr[8], from[8], qn[8], cq[8], nq[8];
-  for(uint j = 0; j < 8u; j++) qr[j] = j < pc.dof ? mix(prm[j], prm[8u + j], rnd()) : 0.0;
-  int ni = nearest_warp(a, ctl[CTL_SNAP0 + a], qr);
+  for(uint j = 0; j < 8u; j++) qr[j] = j < pc.dof ? mix(PRM(j), PRM(8u + j), rnd()) : 0.0;
+  int ni = nearest_warp(a, CTL(CTL_SNAP0 + a), qr);
   load_node(a, uint(ni), from);
   steer(from, qr, qn);
   quantize(qn);
@@ -176,10 +181,10 @@ bool warp_iteration(uint a, uint round) {
 
   // connect: 木bの最近傍 cur から qn へ直線で伸ばす。RRT-Connectの「届くまで range ずつ伸ばす」は同じ直線上を進むだけなので、
   // 直線上の点を先頭から32点ずつ並列に検査して「最初に衝突する点」を見つければ1回で済む(届けば成功、届かなければ衝突直前の点を木bに足す)。
-  int cur = nearest_warp(b, ctl[CTL_SNAP0 + b], qn);
+  int cur = nearest_warp(b, CTL(CTL_SNAP0 + b), qn);
   load_node(b, uint(cur), cq);
   float disp = 0.0;
-  for(uint j = 0; j < pc.dof; j++) disp += abs(qn[j] - cq[j]) * prm[16u + j];
+  for(uint j = 0; j < pc.dof; j++) disp += abs(qn[j] - cq[j]) * PRM(16u + j);
   const int n = max(1, int(ceil(disp / pc.motion_step)));
   int last_free = 0;
   for(int base = 1; base <= n; base += 32) {
@@ -205,8 +210,8 @@ bool warp_iteration(uint a, uint round) {
   int nb = append_node(b, nq, cur);
   if(nb < 0) return false;
   if(!reached) return false;
-  if(gl_SubgroupInvocationID == 0u && atomicMax(ctl[CTL_SOLVED], pc.gen) < pc.gen) {
-    ctl[CTL_WIN] = gl_WorkGroupID.x;
+  if(gl_SubgroupInvocationID == 0u && atomicMax(CTL(CTL_SOLVED), pc.gen) < pc.gen) {
+    CTL(CTL_WIN) = gl_WorkGroupID.x;
     if(a == 0u) write_path(round, ia, nb);
     else write_path(round, nb, ia);
   }
@@ -214,12 +219,17 @@ bool warp_iteration(uint a, uint round) {
 }
 
 void main() {
+  init_problem(gl_WorkGroupID.y);
   const uint wg    = gl_WorkGroupID.x;
-  const uint round = ctl[CTL_ROUND];
-  if(ctl[CTL_SOLVED] >= pc.gen) return;
+  const uint round = CTL(CTL_ROUND);
+  if(CTL(CTL_SOLVED) >= pc.gen || wg >= CTL(CTL_ARGS)) return;
   init_quant();
-  g_margin = uintBitsToFloat(ctl[CTL_MARGIN]);
-  rng_state = pcg(pc.seed ^ (round * 2246822519u + wg * 7919u + 1u));
+  g_margin   = uintBitsToFloat(CTL(CTL_MARGIN));
+  g_nbox     = floatBitsToUint(PRM(PRM_NBOXES));
+  g_nball    = floatBitsToUint(PRM(PRM_NBALLS));
+  g_box_base = g_pid * MAXB * 6u;
+  g_ball_base = g_pid * MAXBALL * 2u;
+  rng_state  = pcg(pc.seed ^ floatBitsToUint(PRM(PRM_SEED)) ^ (round * 2246822519u + wg * 7919u + 1u));
   for(uint r = 0u; r < pc.iters; r++) {
     if(warp_iteration((wg + round + r) & 1u, round)) return;
   }

@@ -28,8 +28,8 @@ struct MotionGenConfig {
   float search_step = 0.1f;                  // 大域探索(RRT-Connect)の辺の検査間隔[m]。粗くすると探索が速くなる(VAMPは約0.2〜0.4m相当)。最終経路は必ずcollision_stepで検証し直す
   float collision_step = 0.05f;              // 経路の短縮・最終検証の辺の検査間隔[m](障害物の厚み+球径をまたがない目安)
   float collision_margin = 0.005f;           // 経路の内部点に持たせる安全余裕[m]。0なら障害物に接した経路になりうる
-  float gpu_handoff_s = 0.001f;              // gpu_search時、まずCPUのRRT-Connectをこの秒数だけ試し、解けなければGPU探索に渡す(簡単な問題はdispatchの固定費0.5ms以下で済むCPUの方が速い)。CPUは0.4ms前後で解けるのが多数派で、GPUはsubmitの固定費が約0.5msかかるため。0ならGPU優先
-  bool gpu_search = false;                   // trueかつuse_vulkanなら、大域探索(RRT-Connect)をGPU上で並列に走らせる(shaders/rrt_gpu.comp)。解けなければCPUのRRT-Connectに戻る
+  float gpu_handoff_s = 0.0003f;             // gpu_search時、まずCPUのRRT-Connectをこの秒数だけ試し、解けなければGPU探索に渡す(簡単な問題はCPUが0.3ms以内に解く。GPUはsubmitの固定費が約0.4msかかる)。0ならGPU優先
+  bool gpu_search = true;                    // 大域探索(RRT-Connect)をGPU(Vulkan compute, shaders/rrt_gpu.comp)でも行う。GPUが使えなければ自動でCPUのみ。難しい問題の計画時間を3分の1程度にする
   int num_threads = 1;                       // 大域探索(RRT-Connect)を独立シードで並列起動する本数。最初に解いたものを採用
   int num_ik_goals = 3;                      // 姿勢ゴール時にIKで集める衝突なし解の数(全てをゴール木の根にする)
   uint64_t seed = 0;                         // 0: 非決定的、それ以外: 再現可能

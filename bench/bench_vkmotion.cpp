@@ -168,7 +168,7 @@ json bench_plan(const json& problems, const cutil::Ref<RobotConfig>& robot, cons
   cfg.collision_margin = margin;
   if(const char* e = std::getenv("BENCH_IK_GOALS")) cfg.num_ik_goals = std::atoi(e);
   cfg.seed            = 1234;
-  cfg.gpu_search      = std::getenv("BENCH_GPU_SEARCH") != nullptr;
+  cfg.gpu_search      = std::getenv("BENCH_NO_GPU_SEARCH") == nullptr;
   if(const char* e = std::getenv("BENCH_HANDOFF")) cfg.gpu_handoff_s = std::atof(e);
   if(const char* e = std::getenv("BENCH_SEARCH_STEP")) cfg.search_step = std::atof(e);
   if(const char* e = std::getenv("BENCH_COLLISION_STEP")) cfg.collision_step = std::atof(e);
@@ -356,7 +356,7 @@ int main(int argc, char** argv) {
     else if(a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
     else if(a == "--margin" && i + 1 < argc) margin = std::stof(argv[++i]);
     else if(a == "--only" && i + 1 < argc) only = argv[++i];
-    else if(a == "--gpu-search") setenv("BENCH_GPU_SEARCH", "1", 1);  // 大域探索(RRT-Connect)をGPUで行う(MotionGenConfig::gpu_search)
+    else if(a == "--gpu-search") {}  // 互換用: vulkanバックエンドでは大域探索のGPU化(MotionGenConfig::gpu_search)が既定でオン
     else if(a == "--skip" && i + 1 < argc) {
       std::string s = argv[++i], tok;
       for(char c : s + ",") {

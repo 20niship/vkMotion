@@ -154,8 +154,8 @@ std::string generate_robot_glsl(const GpuRobotData& r) {
   }
 
   // 直方体: グループの境界球とAABBで候補を絞り(静的に展開)、候補だけ詳細判定
-  o << "  for(uint b = 0; b < pc.num_boxes; b++) {\n";
-  o << "    const uint bo = b * 6;\n    const uint allow = floatBitsToUint(s_boxes[bo].w);\n    const vec3 center = s_boxes[bo].xyz;\n    const vec3 aabb_half = s_boxes[bo + 5].xyz;\n    uint cand = 0u;\n";
+  o << "  for(uint b = 0; b < NUM_BOXES; b++) {\n";
+  o << "    const uint bo = BOX_BASE + b * 6u;\n    const uint allow = floatBitsToUint(s_boxes[bo].w);\n    const vec3 center = s_boxes[bo].xyz;\n    const vec3 aabb_half = s_boxes[bo + 5].xyz;\n    uint cand = 0u;\n";
   for(int g = 0; g < r.num_groups; g++) {
     const float rad = r.group_bs[static_cast<size_t>(g * 4 + 3)];
     o << "    if(((allow >> " << g << "u) & 1u) == 0u && all(lessThanEqual(abs(G" << g << " - center) - aabb_half - vec3(" << lit(rad) << " + MARGIN), vec3(0.0)))) cand |= " << (1u << g) << "u;\n";
@@ -175,7 +175,7 @@ std::string generate_robot_glsl(const GpuRobotData& r) {
   o << "  }\n";
   {
     // 球障害物(数が少ない)はsph[]を引く汎用判定を使うので、あるときだけ全球の世界座標を書き出す
-    o << "  if(pc.num_balls != 0u) {\n";
+    o << "  if(NUM_BALLS != 0u) {\n";
     for(int c = 0; c < r.num_clusters; c++) {
       const int sb = r.cluster_meta[static_cast<size_t>(c * 4 + 1)], sc = r.cluster_meta[static_cast<size_t>(c * 4 + 2)];
       for(int i = sb; i < sb + sc; i++) o << "    sph[" << i << "] = vec4(" << sphere_pos(c, i) << ", " << lit(sphere_r(i)) << ");\n";

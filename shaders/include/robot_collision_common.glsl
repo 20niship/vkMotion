@@ -26,6 +26,19 @@ layout(std430, binding = 10) readonly buffer Balls { vec4 balls[]; };           
 #ifndef MARGIN
 #define MARGIN pc.margin
 #endif
+// 世界(箱・球)の個数と、バッファ内の先頭位置。バッチ探索(問題ごとに別の世界)では呼び出し側が問題ごとの値に定義する。
+#ifndef NUM_BOXES
+#define NUM_BOXES pc.num_boxes
+#endif
+#ifndef NUM_BALLS
+#define NUM_BALLS pc.num_balls
+#endif
+#ifndef BOX_BASE
+#define BOX_BASE 0u
+#endif
+#ifndef BALL_BASE
+#define BALL_BASE 0u
+#endif
 
 // ロボット/世界のデータの置き場所。
 //   ROBOT_SHARED を定義した場合: ワークグループ開始時にshared memoryへ写して使う(load_robot_shared を全レーンから呼び、続けて barrier() すること。早期returnより前)。
@@ -194,9 +207,9 @@ bool group_pair_hit(int g, int h) {
 
 // 球障害物(数が少ないのでブロードフェーズ無し)
 bool balls_hit() {
-  for(uint b = 0; b < pc.num_balls; b++) {
-    vec4 ball = s_balls[b * 2];
-    uint allow = floatBitsToUint(s_balls[b * 2 + 1].x);
+  for(uint b = 0; b < NUM_BALLS; b++) {
+    vec4 ball = s_balls[BALL_BASE + b * 2u];
+    uint allow = floatBitsToUint(s_balls[BALL_BASE + b * 2u + 1u].x);
     for(uint c = 0; c < pc.num_clusters; c++) {
       ivec4 cm = s_cluster_meta[c];
       if(((allow >> uint(cm.w)) & 1u) != 0u) continue;
@@ -284,8 +297,8 @@ bool config_free() {
     gr[g] = s_group_bs[g].w;
   }
 
-  for(uint b = 0; b < pc.num_boxes; b++) {
-    const uint bo = b * 6;
+  for(uint b = 0; b < NUM_BOXES; b++) {
+    const uint bo = BOX_BASE + b * 6u;
     const uint allow = floatBitsToUint(s_boxes[bo].w);
     const vec3 center = s_boxes[bo].xyz;
     const vec3 aabb_half = s_boxes[bo + 5].xyz;

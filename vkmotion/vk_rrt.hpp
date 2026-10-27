@@ -4,6 +4,8 @@
 #include <memory>
 #include <vector>
 
+#include <vulkan/vulkan.h>
+
 #include "fast_collision.hpp"
 
 namespace vkmotion {
@@ -24,11 +26,26 @@ struct GpuRrtSettings {
   uint32_t max_submits       = 4;   // 解けなければ続けてsubmitする回数の上限
 };
 
+// バッチ探索の1問題ぶんの入力/出力。世界(箱・球)は問題ごとに別でよい(箱は32個、球は8個まで)。
+struct GpuRrtProblem {
+  std::vector<float> start;
+  std::vector<std::vector<float>> goals;
+  const GpuWorldData* world = nullptr;
+};
+struct GpuRrtResult {
+  bool solved = false;
+  std::vector<std::vector<float>> path;
+  float margin = 0.0f;  // 経路が満たしている余裕(木が伸びずにGPU側で縮めた場合は settings.margin より小さい)
+};
+
 class VkRrtPipeline {
  public:
   static constexpr size_t kMaxDof = 7;
   static constexpr size_t kMaxGoals = 8;
-  
+  static constexpr size_t kMaxBoxes = 32;
+  static constexpr size_t kMaxBalls = 8;
+  static constexpr size_t kMaxBatch = 1024;
+
   VkRrtPipeline(VkContext& ctx, const GpuRobotData& robot, const std::vector<float>& joint_reach, const std::vector<float>& lower, const std::vector<float>& upper);
   ~VkRrtPipeline();
   VkRrtPipeline(const VkRrtPipeline&)            = delete;
@@ -39,6 +56,9 @@ class VkRrtPipeline {
   bool specialized() const { return specialized_; }
   // 解が見つかればtrueで path=[start,...,goalのどれか]。start/goalsは衝突なしであること。goalsは最大kMaxGoals個。
   // margin_used: 経路が満たしている余裕(木が伸びずにGPU側で縮めた場合は settings.margin より小さい)
+  // 複数の問題(それぞれ別の世界)を1回のsubmitの列でまとめて解く。results[i]が問題iの結果。
+  // 問題あたりのワープ数は settings.first_warps..max_warps(バッチが大きいときは小さくすること。全体で数百〜千ワープが目安)。
+  void plan_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& settings, std::vector<GpuRrtResult>& results);
   bool plan(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings, std::vector<std::vector<float>>& path, float* margin_used = nullptr);
 
  private:
@@ -47,9 +67,12 @@ class VkRrtPipeline {
   uint32_t gen_ = 0;
   bool specialized_ = false;
   std::vector<float> reach_, lower_, upper_;
-  int num_boxes_ = 0, num_balls_ = 0;
+  GpuWorldData world_;  // set_world()で渡された世界(plan()が使う)
+  size_t capacity_ = 0;  // buffers_が確保している問題数
+  void ensure_capacity(size_t problems);
   std::unique_ptr<VkComputeSequence> seq_;
   std::unique_ptr<VkStorageBuffer> params_, steps_meta_, steps_data_, spheres_, cluster_meta_, cluster_bs_, group_meta_, group_bs_, pairs_, boxes_, balls_, result_, ctl_, tree_;
+  std::vector<VkDescriptorBufferInfo> bindings() const;
 };
 
 }  // namespace vkmotion
