@@ -14,19 +14,18 @@ import vamp.transformations as T
 from common import DATA, RESULTS, load_samples
 from prepare import make_vamp_env, quat_to_wxyz
 
-ORDER = ["vamp", "curobo", "vkmotion-vulkan", "vkmotion-cpu", "vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-mt", "vkmotion-gpu-batch"]
+ORDER = ["vamp", "curobo", "vkmotion-vulkan", "vkmotion-cpu", "vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-batch"]
 LABEL = {
     "vamp": "VAMP (CPU SIMD, 1 thread)",
     "curobo": "cuRobo v2 (GPU)",
     "vkmotion-vulkan": "vkMotion (Vulkan + CPU)",
     "vkmotion-cpu": "vkMotion (CPU, 1 thread)",
-    "vkmotion-cpu-mt": "vkMotion (CPU, 8 threads)",
+    "vkmotion-cpu-mt": "vkMotion (CPU, 自動=6スレッド共有木)",
     "vkmotion-gpu": "vkMotion (GPU探索)",
-    "vkmotion-gpu-mt": "vkMotion (GPU探索 + CPU 8スレッド)",
     "vkmotion-gpu-batch": "vkMotion (GPUバッチ32, 1問あたり)",
 }
 PLAN_SKIP = {"vkmotion-vulkan"}  # 計画ループの衝突判定は小バッチ(CPU SIMD)なのでVulkan有効でも-cpuと同一経路
-KERNEL_ONCE = {"vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-mt", "vkmotion-gpu-batch"}  # FK/衝突判定スループットは-cpuと同じ計測なので重複させない
+KERNEL_ONCE = {"vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-batch"}  # FK/衝突判定スループットは-cpuと同じ計測なので重複させない
 
 
 def pct(x, p):

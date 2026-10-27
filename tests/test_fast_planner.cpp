@@ -202,6 +202,7 @@ TEST_CASE("gpu_search: MotionGen solves around an obstacle on the GPU and the pa
   auto world = wall_world(*robot);
   MotionGenConfig cfg = MotionGenConfig::load_from_robot_config(robot, world);
   cfg.gpu_search      = true;
+  cfg.num_threads     = 1;  // GPU探索と競争させるのは単スレッドのとき
   cfg.seed            = 5;
   MotionGen mg(cfg);
   try {
@@ -251,5 +252,25 @@ TEST_CASE("plan_batch_js: solves several problems with different worlds at once 
     REQUIRE(fc.set_world(*worlds[k]));
     for(const auto& s : results[k].trajectory) CHECK(fc.is_free(s.position.data()));
     for(size_t j = 0; j < kGoal.size(); j++) CHECK(results[k].trajectory.back().position[j] == doctest::Approx(kGoal[j]).epsilon(1e-4));
+  }
+}
+
+TEST_CASE("fast_rrt_connect_parallel: threads share one tree and every edge is collision-free at fine resolution") {
+  auto robot = ur5e();
+  auto world = wall_world(*robot);
+  FastCollision fc(*robot, AllowedCollisionMatrix{});
+  REQUIRE(fc.set_world(*world));
+  RrtThreadPool pool(4);
+  for(uint64_t seed : {1ull, 2ull, 3ull}) {
+    FastRrtSettings st;
+    st.seed = seed;
+    FastRrtResult r = fast_rrt_connect_parallel(fc, robot->joint_position_limits_lower(), robot->joint_position_limits_upper(), kStart, {kGoal}, st, pool);
+    REQUIRE(r.success);
+    REQUIRE(r.path.size() >= 3);  // 直線は壁を貫くので途中点がある
+    for(size_t j = 0; j < kStart.size(); j++) {
+      CHECK(r.path.front()[j] == doctest::Approx(kStart[j]).epsilon(1e-5));
+      CHECK(r.path.back()[j] == doctest::Approx(kGoal[j]).epsilon(1e-5));
+    }
+    for(size_t i = 0; i + 1 < r.path.size(); i++) CHECK(fc.motion_free(r.path[i].data(), r.path[i + 1].data(), 0.0f, true));
   }
 }

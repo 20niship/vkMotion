@@ -1,6 +1,8 @@
 #include "fast_planner.hpp"
 #include "simd8.hpp"
 
+#include <thread>
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -241,6 +243,253 @@ FastRrtResult fast_rrt_connect(const FastCollision& fc, const std::vector<float>
     }
     a_is_start = !a_is_start;
   }
+  return res;
+}
+
+// ---- スレッドプール ----
+
+struct RrtThreadPool::Impl {
+  std::vector<std::thread> threads;
+  std::atomic<uint32_t> generation{0};
+  std::atomic<int> remaining{0};
+  std::atomic<bool> stop{false};
+  const std::function<void(int)>* fn = nullptr;
+};
+
+RrtThreadPool::RrtThreadPool(int participants) : participants_(std::max(1, participants)), impl_(new Impl()) {
+  for(int t = 1; t < participants_; t++) {
+    impl_->threads.emplace_back([this, t] {
+      uint32_t seen = 0;
+      while(true) {
+        // 短くスピンして新しい仕事を拾い、無ければfutexで眠る
+        for(int spin = 0; spin < 4000 && impl_->generation.load(std::memory_order_acquire) == seen && !impl_->stop.load(std::memory_order_relaxed); spin++) {
+#if defined(__x86_64__)
+          __builtin_ia32_pause();
+#endif
+        }
+        impl_->generation.wait(seen, std::memory_order_acquire);
+        if(impl_->stop.load(std::memory_order_acquire)) return;
+        seen = impl_->generation.load(std::memory_order_acquire);
+        (*impl_->fn)(t);
+        impl_->remaining.fetch_sub(1, std::memory_order_acq_rel);
+        impl_->remaining.notify_all();
+      }
+    });
+  }
+}
+
+RrtThreadPool::~RrtThreadPool() {
+  impl_->stop.store(true, std::memory_order_release);
+  impl_->generation.fetch_add(1, std::memory_order_acq_rel);
+  impl_->generation.notify_all();
+  for(auto& th : impl_->threads) th.join();
+  delete impl_;
+}
+
+void RrtThreadPool::run(const std::function<void(int)>& fn) {
+  if(participants_ == 1) {
+    fn(0);
+    return;
+  }
+  impl_->fn = &fn;
+  impl_->remaining.store(participants_ - 1, std::memory_order_release);
+  impl_->generation.fetch_add(1, std::memory_order_acq_rel);
+  impl_->generation.notify_all();
+  fn(0);
+  for(int r = impl_->remaining.load(std::memory_order_acquire); r != 0; r = impl_->remaining.load(std::memory_order_acquire)) {
+    for(int spin = 0; spin < 2000 && impl_->remaining.load(std::memory_order_acquire) != 0; spin++) {
+#if defined(__x86_64__)
+      __builtin_ia32_pause();
+#endif
+    }
+    r = impl_->remaining.load(std::memory_order_acquire);
+    if(r != 0) impl_->remaining.wait(r, std::memory_order_acquire);
+  }
+}
+
+namespace {
+
+// 複数スレッドが同時にノードを足せる木。追加は「番号を予約 -> 書く -> 番号順に公開」で、公開済みの範囲[0, published)だけが他スレッドから読める。
+struct SharedTree {
+  size_t dof = 0, stride = 0;
+  uint32_t cap = 0;
+  std::vector<float> q;
+  std::vector<int> parent;
+  std::vector<v8f> blocks;
+  std::atomic<uint32_t> reserved{0}, published{0};
+
+  void reset(size_t dof_, uint32_t cap_) {
+    dof    = dof_;
+    stride = (dof_ + 3) & ~size_t{3};
+    cap    = cap_;
+    q.assign(static_cast<size_t>(cap) * stride, 0.0f);
+    parent.assign(cap, -1);
+    blocks.assign(static_cast<size_t>((cap + 7) / 8) * dof, v8f{} + 1e18f);
+    reserved.store(0);
+    published.store(0);
+  }
+  const float* at(uint32_t i) const { return q.data() + static_cast<size_t>(i) * stride; }
+  // 追加できなければ -1(容量超過)
+  int append(const float* v, int par) {
+    const uint32_t i = reserved.fetch_add(1, std::memory_order_acq_rel);
+    if(i >= cap) return -1;
+    std::copy(v, v + dof, q.begin() + static_cast<std::ptrdiff_t>(i * stride));
+    parent[i] = par;
+    // ブロック内の別レーンを別スレッドが同時に書くので、ベクトル全体の読み書きになりうる v[lane]= ではなく、スカラーのstoreで書く
+    float* bf = reinterpret_cast<float*>(blocks.data());
+    for(size_t j = 0; j < dof; j++) bf[((i / 8) * dof + j) * 8 + (i % 8)] = v[j];
+    while(published.load(std::memory_order_acquire) != i) {
+#if defined(__x86_64__)
+      __builtin_ia32_pause();
+#endif
+    }
+    published.store(i + 1, std::memory_order_release);
+    return static_cast<int>(i);
+  }
+  // 公開済みのn個の中の最近傍
+  int nearest(const float* v, uint32_t n) const {
+    v8f bd = v8f{} + 1e30f;
+    v8i bi = v8i{};
+    for(uint32_t b = 0; static_cast<uint32_t>(b) * 8 < n; b++) {
+      const v8f* blk = blocks.data() + static_cast<size_t>(b) * dof;
+      v8f d2         = v8f{};
+      for(size_t j = 0; j < dof; j++) {
+        const v8f d = blk[j] - v[j];
+        d2 += d * d;
+      }
+      if((b + 1) * 8 > n) {  // 最後のブロックの未公開レーンは使わない
+        v8i idx = {0, 1, 2, 3, 4, 5, 6, 7};
+        idx += static_cast<int>(b * 8);
+        d2 = (idx < static_cast<int>(n)) ? d2 : v8f{} + 1e30f;
+      }
+      const v8i better = d2 < bd;
+      bd               = better ? d2 : bd;
+      bi               = better ? v8i{} + static_cast<int>(b) : bi;
+    }
+    float best = 1e30f;
+    int idx    = 0;
+    for(int lane = 0; lane < 8; lane++) {
+      if(bd[lane] < best) {
+        best = bd[lane];
+        idx  = bi[lane] * 8 + lane;
+      }
+    }
+    return idx;
+  }
+};
+
+}  // namespace
+
+FastRrtResult fast_rrt_connect_parallel(const FastCollision& fc, const std::vector<float>& lower, const std::vector<float>& upper, const std::vector<float>& start,
+                                        const std::vector<std::vector<float>>& goals, const FastRrtSettings& st, RrtThreadPool& pool) {
+  FastRrtResult res;
+  const size_t dof = fc.dof();
+  const auto t0    = std::chrono::steady_clock::now();
+  for(const auto& g : goals) {
+    if(fc.motion_free(start.data(), g.data(), st.margin, false, st.motion_step)) {
+      res.success = true;
+      res.path    = {start, g};
+      return res;
+    }
+  }
+  constexpr uint32_t kCap = 8192;
+  static thread_local SharedTree trees_storage[2];  // 呼び出しスレッドごとに使い回す(毎回の確保を避ける)
+  SharedTree& ts = trees_storage[0];                // start側
+  SharedTree& tg = trees_storage[1];                // goal側
+  ts.reset(dof, kCap);
+  tg.reset(dof, kCap);
+  ts.append(start.data(), -1);
+  for(const auto& g : goals) tg.append(g.data(), -1);
+
+  std::atomic<bool> stop{false};
+  std::atomic<int> solved{0};
+  std::atomic<float> margin_now{st.margin};
+  int win_a = -1, win_b = -1;  // 勝ったスレッドが書く: 木Aのノード、木Bのノード(同じ配置)
+  bool win_a_is_start = true;
+  std::atomic<int> thread0_iters{0};
+
+  pool.run([&](int tid) {
+    HaltonSampler halton(st.seed + static_cast<uint64_t>(tid) * 7919ull, dof);
+    std::vector<float> sample(dof), nq(dof), cur(dof);
+    for(int iter = 0; iter < st.max_iterations; iter++) {
+      if((iter & 15) == 0) {
+        if(stop.load(std::memory_order_relaxed)) return;
+        if(tid == 0) {
+          thread0_iters.store(iter, std::memory_order_relaxed);
+          if(st.cancel && st.cancel->load(std::memory_order_relaxed)) { stop.store(true); return; }
+          if(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > st.timeout_s) { stop.store(true); return; }
+          if(st.should_stop && st.should_stop()) { stop.store(true); return; }
+          // 端点が障害物すれすれで片方の木が育たないとき、余裕を縮める(fast_rrt_connectと同じ規則。反復数は全スレッド分に換算)
+          const float m = margin_now.load(std::memory_order_relaxed);
+          const size_t total_iters = static_cast<size_t>(iter) * static_cast<size_t>(pool.size());
+          if(m > 0.0f && st.adapt_margin && total_iters >= 256 && (iter & 127) == 0 &&
+             std::min(ts.published.load(), tg.published.load()) < 3 + total_iters / 128) {
+            if(m > 0.3f * st.margin) margin_now.store(0.25f * st.margin);
+            else if(total_iters >= 768) margin_now.store(0.0f);
+          }
+        }
+      }
+      const bool a_is_start = ((iter + tid) & 1) == 0;
+      SharedTree& A         = a_is_start ? ts : tg;
+      SharedTree& B         = a_is_start ? tg : ts;
+      const float mgn       = margin_now.load(std::memory_order_relaxed);
+
+      halton.next(sample.data());
+      for(size_t j = 0; j < dof; j++) sample[j] = lower[j] + sample[j] * (upper[j] - lower[j]);
+      const uint32_t na = A.published.load(std::memory_order_acquire);
+      const int ni      = A.nearest(sample.data(), na);
+      steer(A.at(static_cast<uint32_t>(ni)), sample.data(), dof, st.range, nq.data());
+      if(!fc.motion_free(A.at(static_cast<uint32_t>(ni)), nq.data(), mgn, true, st.motion_step)) continue;
+      const int a_new = A.append(nq.data(), ni);
+      if(a_new < 0) {  // 容量超過 -> この試行は終わり(呼び出し側が別シードで再開する)
+        stop.store(true);
+        return;
+      }
+      const uint32_t nb = B.published.load(std::memory_order_acquire);
+      int bn            = B.nearest(nq.data(), nb);
+      bool reached      = false;
+      for(int guard = 0; guard < 10000; guard++) {
+        const bool at_target = steer(B.at(static_cast<uint32_t>(bn)), nq.data(), dof, st.range, cur.data());
+        if(!fc.motion_free(B.at(static_cast<uint32_t>(bn)), cur.data(), mgn, true, st.motion_step)) break;
+        const int nn = B.append(cur.data(), bn);
+        if(nn < 0) {
+          stop.store(true);
+          return;
+        }
+        bn = nn;
+        if(at_target) {
+          reached = true;
+          break;
+        }
+      }
+      if(reached) {
+        int expected = 0;
+        if(solved.compare_exchange_strong(expected, 1)) {
+          win_a          = a_new;
+          win_b          = bn;
+          win_a_is_start = a_is_start;
+          stop.store(true);
+        }
+        return;
+      }
+    }
+  });
+
+  res.iterations = thread0_iters.load();
+  res.margin     = margin_now.load();
+  if(solved.load() == 0) return res;
+  // 経路: start側の根 -> ... -> 接続点 -> ... -> goal側の根
+  const SharedTree& S = ts;
+  const SharedTree& G = tg;
+  const int s_node    = win_a_is_start ? win_a : win_b;
+  const int g_node    = win_a_is_start ? win_b : win_a;
+  ConfigPath from_start, to_goal;
+  for(int i = s_node; i >= 0; i = S.parent[static_cast<size_t>(i)]) from_start.emplace_back(S.at(static_cast<uint32_t>(i)), S.at(static_cast<uint32_t>(i)) + dof);
+  std::reverse(from_start.begin(), from_start.end());
+  for(int i = g_node; i >= 0; i = G.parent[static_cast<size_t>(i)]) to_goal.emplace_back(G.at(static_cast<uint32_t>(i)), G.at(static_cast<uint32_t>(i)) + dof);
+  res.path = std::move(from_start);
+  res.path.insert(res.path.end(), to_goal.begin() + 1, to_goal.end());  // 接続点は重複するので1つ飛ばす
+  res.success = true;
   return res;
 }
 

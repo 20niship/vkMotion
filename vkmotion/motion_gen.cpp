@@ -357,7 +357,7 @@ std::vector<JointState> densify(const ConfigPath& path) {
 
 }  // namespace
 
-MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& start, const std::vector<JointState>& goals, const MotionGenPlanConfig& plan_config, bool allow_gpu) {
+MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& start, const std::vector<JointState>& goals, const MotionGenPlanConfig& plan_config, bool allow_gpu, bool single_thread) {
   MotionGenResult result;
   const float margin = config_.collision_margin;
   const RobotConfig& robot = *config_.robot_config;
@@ -385,7 +385,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
   const float fine_step   = config_.collision_step;
   const float coarse_step = std::max(config_.search_step, fine_step);
   const bool via_search   = direct.empty();
-  const int threads       = std::max(1, config_.num_threads);
+  const int threads       = single_thread ? 1 : config_.num_threads > 0 ? config_.num_threads : std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8);
 
   // 大域探索(step: 辺の検査間隔)。見つからなければ空の経路を返す。
   float used_margin = margin;  // 見つかった経路が満たしている余裕(端点がすれすれの問題では縮める)
@@ -394,7 +394,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
     used_margin = margin;
     // GPU探索とCPU探索の競争: 簡単な問題はCPUだけで先に解く(gpu_handoff_s)。解けなければGPU探索を裏で走らせたままCPUの探索を続け、先に解けた方を採る。
     // (submitが数十µsで戻るので、GPUの固定費はCPUの探索と重なる。GPUが常に温まるのでクロックが落ちにくい副次効果もある)
-    const bool race = allow_gpu && config_.gpu_search && robot_world().gpu_rrt_available();
+    const bool race = allow_gpu && config_.gpu_search && threads == 1 && robot_world().gpu_rrt_available();
     bool gpu_running = false, gpu_solved = false;
     auto gpu_poll    = [&]() {
       if(!gpu_running) return;
@@ -437,7 +437,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       FastRrtSettings quick;
       quick.margin      = margin;
       quick.motion_step = step;
-      quick.timeout_s   = 0.0005;
+      quick.timeout_s   = std::max(config_.gpu_handoff_s, 0.0001f);
       quick.seed        = seed ^ 0xA5A5A5A5ull;
       rrt               = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, quick);
       if(rrt.success) used_margin = rrt.margin;
@@ -459,37 +459,15 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
         };
         rrt     = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, st);
       } else {
-        std::atomic<bool> cancel{false};
-        std::vector<std::future<FastRrtResult>> futs;
-        for(int t = 0; t < threads; t++) {
-          FastRrtSettings s = st;
-          s.seed            = seed + static_cast<uint64_t>(attempt) * 1000003ull + static_cast<uint64_t>(t) * 7777ull;
-          s.cancel          = &cancel;
-          futs.push_back(std::async(std::launch::async, [&, s] {
-            FastRrtResult r = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, s);
-            if(r.success) cancel.store(true);
-            return r;
-          }));
-        }
-        // スレッドの完了を待つ間に、GPU探索が先に解けたか調べる(Vulkanはこのスレッドからしか触らない)
-        while(true) {
-          bool all_ready = true;
-          for(auto& f : futs)
-            if(f.wait_for(std::chrono::seconds(0)) != std::future_status::ready) all_ready = false;
-          if(all_ready) break;
-          if(gpu_running) {
-            gpu_poll();
-            if(gpu_solved) {
-              cancel.store(true);
-              break;
-            }
-          }
-          std::this_thread::sleep_for(std::chrono::microseconds(20));
-        }
-        for(auto& f : futs) {
-          FastRrtResult r = f.get();
-          if(r.success && (!rrt.success || r.path.size() < rrt.path.size())) rrt = std::move(r);
-        }
+        // 複数スレッドで1組の木を共有して伸ばす(共有木。独立シードを競わせるより、同じ時間で作れるノードが多い)。
+        // 呼び出しスレッド(=Vulkanに触れる唯一のスレッド)だけがGPU探索の完了を調べる。
+        st.seed = seed + static_cast<uint64_t>(attempt) * 1000003ull;
+        if(gpu_running) st.should_stop = [&]() {
+          gpu_poll();
+          return gpu_solved;
+        };
+        if(!rrt_pool_ || rrt_pool_->size() != threads) rrt_pool_ = std::make_unique<RrtThreadPool>(threads);
+        rrt = fast_rrt_connect_parallel(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, st, *rrt_pool_);
       }
       if(rrt.success) {
         used_margin = rrt.margin;
@@ -672,7 +650,7 @@ std::vector<MotionGenResult> MotionGen::plan_batch_js(const std::vector<BatchPro
     if(!fcs[i]) return;
     const uint64_t seed = (config_.seed ? config_.seed : std::random_device{}()) + 0x9E3779B9ull * (plan_counter_.fetch_add(1) + 1);
     if(gres[i].solved) out[i] = finish_path(*fcs[i], gres[i].path, gres[i].margin, config_.search_step, seed, plan_config);
-    if(!out[i].success) out[i] = plan_fast(*fcs[i], problems[i].start, {problems[i].goal}, plan_config, false);
+    if(!out[i].success) out[i] = plan_fast(*fcs[i], problems[i].start, {problems[i].goal}, plan_config, false, true);  // 外側が既にスレッド並列なので単スレッドで
   });
   return out;
 }

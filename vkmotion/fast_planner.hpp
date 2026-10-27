@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <thread>
 #include <vector>
 
 #include "fast_collision.hpp"
@@ -34,6 +35,30 @@ struct FastRrtResult {
 // start/goalsは衝突なしであること。経路は[start, ..., goalのどれか]。
 FastRrtResult fast_rrt_connect(const FastCollision& fc, const std::vector<float>& lower, const std::vector<float>& upper, const std::vector<float>& start,
                                const std::vector<std::vector<float>>& goals, const FastRrtSettings& settings = {});
+
+// 常駐スレッドプール。run(fn) は fn(0..size()-1) を並列に実行して全部終わるまで待つ(fn(0)は呼び出しスレッド)。
+// 起動はfutex待ち+短いスピンなので、毎回スレッドを作るより数十µs速い。
+class RrtThreadPool {
+ public:
+  explicit RrtThreadPool(int participants);  // 呼び出しスレッドを含む総数(1なら追加スレッド無し)
+  ~RrtThreadPool();
+  RrtThreadPool(const RrtThreadPool&)            = delete;
+  RrtThreadPool& operator=(const RrtThreadPool&) = delete;
+  int size() const { return participants_; }
+  void run(const std::function<void(int)>& fn);
+
+ private:
+  struct Impl;
+  int participants_;
+  Impl* impl_;
+};
+
+// 複数スレッドが「1組の木」を共有して同時に伸ばす双方向RRT-Connect(GPU探索と同じ考え方をCPUスレッドで)。
+// 各スレッドが別のHalton列でサンプルし、追加したノードは公開された時点で他スレッドから見える(ラウンドを待たない)。
+// 1スレッドの fast_rrt_connect の数倍のノードを同じ時間で作れるので、難しい問題の時間を縮める。結果の経路とmarginの意味は fast_rrt_connect と同じ。
+// should_stop は呼び出しスレッド(fn(0))からだけ呼ばれる。
+FastRrtResult fast_rrt_connect_parallel(const FastCollision& fc, const std::vector<float>& lower, const std::vector<float>& upper, const std::vector<float>& start,
+                                        const std::vector<std::vector<float>>& goals, const FastRrtSettings& settings, RrtThreadPool& pool);
 
 // ランダムな2点を直線で結び直すshortcut。検査はmotion_free(二分法)なので1回あたり数µs〜数十µs。
 void fast_shortcut(const FastCollision& fc, ConfigPath& path, int iterations, uint64_t seed, float margin = 0.0f, float step = 0.0f);
