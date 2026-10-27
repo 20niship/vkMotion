@@ -149,6 +149,26 @@ void RobotWorld::warmup() const {
   }
 }
 
+bool RobotWorld::gpu_rrt_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& settings, std::vector<GpuRrtResult>& results) const {
+  if(!gpu_rrt_available()) return false;
+  const FastCollision* fc = fast_collision();
+  try {
+    std::lock_guard<std::mutex> lock(fast_mutex_);
+    if(!vk_rrt_) {
+      GpuRobotData rd;
+      if(!fc->pack_gpu_robot(rd)) throw std::runtime_error("robot exceeds GPU limits");
+      if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
+      vk_rrt_         = std::make_unique<VkRrtPipeline>(*vk_ctx_, rd, fc->joint_reach(), config_.robot_config->joint_position_limits_lower(), config_.robot_config->joint_position_limits_upper());
+      vk_rrt_version_ = ~uint64_t{0};
+    }
+    vk_rrt_->plan_batch(problems, settings, results);
+    return true;
+  } catch(const std::exception&) {
+    vk_rrt_failed_ = true;
+    return false;
+  }
+}
+
 bool RobotWorld::gpu_rrt_available() const {
   if(!config_.use_vulkan || vk_rrt_failed_) return false;
   const FastCollision* fc = fast_collision();

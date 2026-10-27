@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <thread>
 #include <future>
 #include <random>
 
@@ -355,11 +357,11 @@ std::vector<JointState> densify(const ConfigPath& path) {
 
 }  // namespace
 
-MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& start, const std::vector<JointState>& goals, const MotionGenPlanConfig& plan_config) {
+MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& start, const std::vector<JointState>& goals, const MotionGenPlanConfig& plan_config, bool allow_gpu) {
   MotionGenResult result;
   const float margin = config_.collision_margin;
   const RobotConfig& robot = *config_.robot_config;
-  const uint64_t seed      = (config_.seed ? config_.seed : std::random_device{}()) + 0x9E3779B9ull * (++plan_counter_);
+  const uint64_t seed      = (config_.seed ? config_.seed : std::random_device{}()) + 0x9E3779B9ull * (plan_counter_.fetch_add(1) + 1);
 
   std::vector<std::vector<float>> goal_q;
   for(const auto& g : goals) goal_q.push_back(g.position);
@@ -390,7 +392,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
   auto search = [&](float step) -> ConfigPath {
     FastRrtResult rrt;
     used_margin = margin;
-    if(config_.gpu_search && robot_world().gpu_rrt_available()) {
+    if(allow_gpu && config_.gpu_search && robot_world().gpu_rrt_available()) {
       if(config_.gpu_handoff_s > 0.0f) {
         FastRrtSettings quick;
         quick.margin      = margin;
@@ -521,6 +523,114 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
   result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits(), config_.max_acceleration);
   result.status             = via_search ? "success (RRT-Connect fallback)" : "success";
   return result;
+}
+
+
+// GPU探索などで見つかった経路を、短縮 -> (粗い刻みで探索した場合は)細かい刻みで検証 -> 密にして時間パラメタライズ する。検証に通らなければ success=false。
+MotionGenResult MotionGen::finish_path(const FastCollision& fc, std::vector<std::vector<float>> path, float used_margin, float step_searched, uint64_t seed, const MotionGenPlanConfig& plan_config) {
+  MotionGenResult result;
+  const RobotConfig& robot = *config_.robot_config;
+  const float fine_step    = config_.collision_step;
+  fast_reduce(fc, path, used_margin, fine_step);
+  fast_shortcut(fc, path, plan_config.shortcut_iterations, seed, used_margin, fine_step);
+  if(step_searched > fine_step) {
+    for(size_t i = 0; i + 1 < path.size(); i++) {
+      if((i + 1 < path.size() - 1 && !fc.is_free_margin(path[i + 1].data(), 0.0f)) || !fc.motion_free(path[i].data(), path[i + 1].data(), 0.0f, false, fine_step)) {
+        result.status = "searched path failed the fine verification";
+        return result;
+      }
+    }
+  }
+  ConfigPath cleaned{path.front()};
+  for(size_t i = 1; i < path.size(); i++) {
+    float d2 = 0.0f;
+    for(size_t j = 0; j < path[i].size(); j++) d2 += (path[i][j] - cleaned.back()[j]) * (path[i][j] - cleaned.back()[j]);
+    if(d2 > 1e-6f || i + 1 == path.size()) cleaned.push_back(path[i]);
+  }
+  result.trajectory         = densify(cleaned);
+  result.interpolated_times = time_parameterize(result.trajectory, robot.joint_velocity_limits(), config_.max_acceleration);
+  result.success            = true;
+  result.status             = "success (RRT-Connect fallback)";
+  return result;
+}
+
+std::vector<MotionGenResult> MotionGen::plan_batch_js(const std::vector<BatchProblem>& problems, const MotionGenPlanConfig& plan_config) {
+  const size_t n = problems.size();
+  std::vector<MotionGenResult> out(n);
+  if(n == 0) return out;
+  RobotWorld& rw            = robot_world();
+  const FastCollision* base = rw.fast_collision();
+  if(!base) {
+    for(auto& r : out) r.status = "batch planning needs the compiled collision path (cuboid/sphere/cylinder/capsule/plane obstacles only)";
+    return out;
+  }
+  const float margin = config_.collision_margin;
+  const size_t nth   = std::max<size_t>(1, std::min<size_t>(16, std::thread::hardware_concurrency()));
+  auto parallel_for  = [&](size_t count, const std::function<void(size_t)>& fn) {
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> pool;
+    for(size_t t = 0; t < std::min(nth, count); t++)
+      pool.emplace_back([&] {
+        for(size_t i = next.fetch_add(1); i < count; i = next.fetch_add(1)) fn(i);
+      });
+    for(auto& th : pool) th.join();
+  };
+
+  // 1. 問題ごとの世界を持つ衝突判定を作り、端点と直線を調べる
+  std::vector<std::unique_ptr<FastCollision>> fcs(n);
+  std::vector<uint8_t> need_search(n, 0);
+  parallel_for(n, [&](size_t i) {
+    auto f = std::make_unique<FastCollision>(*base);
+    if(!problems[i].world || !f->set_world(*problems[i].world)) {
+      out[i].status = "unsupported world for batch planning";
+      return;
+    }
+    if(!f->is_free(problems[i].start.position.data()) || !f->is_free(problems[i].goal.position.data())) {
+      out[i].status = "start or goal state is in collision";
+      return;
+    }
+    need_search[i] = !f->motion_free(problems[i].start.position.data(), problems[i].goal.position.data(), margin, false, config_.collision_step);
+    fcs[i]         = std::move(f);
+  });
+
+  // 2. 直線で通れない問題の大域探索を、全問題まとめてGPUで
+  std::vector<GpuRrtResult> gres(n);
+  {
+    std::vector<GpuRrtProblem> gp;
+    std::vector<size_t> gp_index;
+    std::vector<GpuWorldData> worlds(n);
+    for(size_t i = 0; i < n; i++) {
+      if(!fcs[i] || !need_search[i]) continue;
+      fcs[i]->pack_gpu_world(worlds[i]);
+      GpuRrtProblem p;
+      p.start = problems[i].start.position;
+      p.goals = {problems[i].goal.position};
+      p.world = &worlds[i];
+      gp.push_back(std::move(p));
+      gp_index.push_back(i);
+    }
+    if(!gp.empty() && config_.gpu_search) {
+      GpuRrtSettings gs;
+      gs.margin      = margin;
+      gs.motion_step = config_.search_step;
+      gs.max_submits = 6;
+      gs.first_warps = 8;    // 解けた問題のワープは即終了するので上限は大きくてよい。最初は少なく始め、ラウンドごとに倍々にする
+      gs.max_warps   = 256;
+      gs.seed        = static_cast<uint32_t>(config_.seed ? config_.seed : std::random_device{}());
+      std::vector<GpuRrtResult> r;
+      if(rw.gpu_rrt_batch(gp, gs, r))
+        for(size_t k = 0; k < gp_index.size(); k++) gres[gp_index[k]] = std::move(r[k]);
+    }
+  }
+
+  // 3. 経路の整形・検証・時間パラメタライズ(CPUスレッド並列)。GPUで解けなかった問題や検証に通らなかった問題は個別にCPUで解く
+  parallel_for(n, [&](size_t i) {
+    if(!fcs[i]) return;
+    const uint64_t seed = (config_.seed ? config_.seed : std::random_device{}()) + 0x9E3779B9ull * (plan_counter_.fetch_add(1) + 1);
+    if(gres[i].solved) out[i] = finish_path(*fcs[i], gres[i].path, gres[i].margin, config_.search_step, seed, plan_config);
+    if(!out[i].success) out[i] = plan_fast(*fcs[i], problems[i].start, {problems[i].goal}, plan_config, false);
+  });
+  return out;
 }
 
 MotionGenResult MotionGen::plan_single_js(const JointState& start_state, const JointState& goal_state, const MotionGenPlanConfig& plan_config) {

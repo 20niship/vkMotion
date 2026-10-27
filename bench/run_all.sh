@@ -40,6 +40,8 @@ if [[ $LIBS == *vkmotion* ]]; then
   ./build-bench/bench/bench_vkmotion bench/data bench/results/vkmotion-cpu-mt.json --backend cpu --limit "$LIMIT" --threads 8 --skip fkcol
   # 大域探索をGPU(rrt_gpu.comp)で行う構成。初回はロボット専用シェーダのコンパイル(glslc)が走る(以降はキャッシュ)
   ./build-bench/bench/bench_vkmotion bench/data bench/results/vkmotion-gpu.json --backend vulkan --limit "$LIMIT" --gpu-search --skip fkcol,ik
+  # 同じ問題をバッチ(32件ずつ、問題ごとに別の世界)でまとめてGPU探索。time_msは「バッチ時間/件数」
+  ./build-bench/bench/bench_vkmotion bench/data bench/results/vkmotion-gpu-batch.json --backend vulkan --limit "$LIMIT" --batch 32 --skip fkcol,ik,pose
 fi
 (cd bench && ../$PY report.py > /dev/null)
 echo "=> bench/RESULTS.md"

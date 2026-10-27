@@ -223,3 +223,33 @@ TEST_CASE("gpu_search: MotionGen solves around an obstacle on the GPU and the pa
   for(size_t j = 0; j < kStart.size(); j++) CHECK(r.trajectory.front().position[j] == doctest::Approx(kStart[j]).epsilon(1e-4));
   for(size_t j = 0; j < kGoal.size(); j++) CHECK(r.trajectory.back().position[j] == doctest::Approx(kGoal[j]).epsilon(1e-4));
 }
+
+TEST_CASE("plan_batch_js: solves several problems with different worlds at once and every path is collision-free") {
+  auto robot = ur5e();
+  MotionGenConfig cfg = MotionGenConfig::load_from_robot_config(robot, cutil::make_ref<WorldConfig>());
+  cfg.seed            = 9;
+  MotionGen mg(cfg);
+  try {
+    mg.warmup();
+  } catch(const std::exception&) {
+    MESSAGE("Vulkan unavailable; skipping");
+    return;
+  }
+  std::vector<MotionGen::BatchProblem> problems;
+  std::vector<cutil::Ref<WorldConfig>> worlds;
+  for(int k = 0; k < 4; k++) {
+    auto world = wall_world(*robot);
+    if(k == 1) world = cutil::make_ref<WorldConfig>();  // 障害物なし(直線で通る)
+    worlds.push_back(world);
+    problems.push_back({JointState{kStart, {}}, JointState{kGoal, {}}, world});
+  }
+  auto results = mg.plan_batch_js(problems);
+  REQUIRE(results.size() == problems.size());
+  for(size_t k = 0; k < problems.size(); k++) {
+    REQUIRE(results[k].success);
+    FastCollision fc(*robot, AllowedCollisionMatrix{});
+    REQUIRE(fc.set_world(*worlds[k]));
+    for(const auto& s : results[k].trajectory) CHECK(fc.is_free(s.position.data()));
+    for(size_t j = 0; j < kGoal.size(); j++) CHECK(results[k].trajectory.back().position[j] == doctest::Approx(kGoal[j]).epsilon(1e-4));
+  }
+}

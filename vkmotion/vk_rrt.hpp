@@ -68,6 +68,7 @@ class VkRrtPipeline {
   bool specialized_ = false;
   std::vector<float> reach_, lower_, upper_;
   GpuWorldData world_;  // set_world()で渡された世界(plan()が使う)
+  uint32_t tree_cap_ = 4096;  // 1本の木のノード数上限(plan_batchが問題数に応じて決める)
   size_t capacity_ = 0;  // buffers_が確保している問題数
   void ensure_capacity(size_t problems);
   std::unique_ptr<VkComputeSequence> seq_;

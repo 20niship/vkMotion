@@ -29,11 +29,10 @@ layout(push_constant) uniform PushConstants {
   uint gmax;   // ワープ数の上限
   uint grow;   // 何ラウンドごとにワープ数を倍にするか
   uint iters;  // 1ラウンドで各ワープが行うRRT-Connect反復の数
+  uint tree_cap;  // 1本の木のノード数上限(問題数が多いときは小さくしてメモリに収める)
 }
 pc;
 
-const uint CAP        = 4096;  // 1本の木のノード数上限(バッチで問題数が多くても木のメモリが収まるように)
-const uint CAP_SOFT   = 3500;  // これを超えたらラウンド境界で作り直す(根だけ残す)
 const uint MAXP       = 128;   // 返す経路の最大点数
 const uint CTL_CNT0   = 0;     // 木0のノード数(append用アトミックカウンタ)
 const uint CTL_CNT1   = 1;
@@ -63,6 +62,8 @@ void init_problem(uint pid) {
 }
 #define PRM(i) prm[g_pb + (i)]
 #define CTL(i) ctl[g_cb + (i)]
+#define CAP pc.tree_cap
+#define CAP_SOFT (pc.tree_cap - pc.tree_cap / 8u)  // これを超えたらラウンド境界で作り直す(根だけ残す)
 #define NODE(t, i) nd[(g_pid * 2u + (t)) * CAP + (i)]
 
 float qlo[8], qstep[8], qinv[8];

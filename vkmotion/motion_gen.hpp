@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cutil/ref.hpp>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -17,6 +18,7 @@ namespace vkmotion {
 
 class IKSolver;
 class FastCollision;
+class VkRrtPipeline;
 
 struct MotionGenConfig {
   cutil::Ref<RobotConfig> robot_config;
@@ -42,7 +44,7 @@ struct MotionGenPlanConfig {
   int max_attempts         = 10;
   bool enable_graph_planner = true;  // trueなら直線補間+局所repairが全滅した後にRRT-Connectフォールバックを試す
   float timeout_seconds    = 5.0f;
-  int shortcut_iterations  = 60;  // 経路短縮(ランダムな2点を直線で結び直す)の試行回数。増やすと経路が短くなるが時間も増える
+  int shortcut_iterations  = 30;  // 経路短縮(ランダムな2点を直線で結び直す)の試行回数。増やすと経路が短くなるが時間も増える
 };
 
 struct MotionGenResult {
@@ -62,17 +64,27 @@ class MotionGen {
   RobotWorld& robot_world_for_test() { return robot_world(); }  // テスト用(GPU探索が使えるかの確認)
 
   MotionGenResult plan_single(const JointState& start_state, const Pose& goal_pose, const MotionGenPlanConfig& plan_config = {});
+  // 複数の関節空間問題(それぞれ別の世界)をまとめて解く。大域探索は全問題を1回のGPU submit列で並列に行い(cuRoboのバッチプランナー相当)、
+  // 経路の整形・検証・時間パラメタライズはCPUスレッドで並列に行う。GPUが使えない・世界が高速パス非対応の問題は個別にCPUで解く。
+  // 1問あたりの時間は、問題数が多いほどGPUの固定費が薄まって短くなる(単発より数倍速い)。
+  struct BatchProblem {
+    JointState start;
+    JointState goal;
+    cutil::Ref<WorldConfig> world;
+  };
+  std::vector<MotionGenResult> plan_batch_js(const std::vector<BatchProblem>& problems, const MotionGenPlanConfig& plan_config = {});
   MotionGenResult plan_single_js(const JointState& start_state, const JointState& goal_state, const MotionGenPlanConfig& plan_config = {});
 
  private:
   RobotWorld& robot_world();
   IKSolver& ik_solver();
-  MotionGenResult plan_fast(const FastCollision& fc, const JointState& start, const std::vector<JointState>& goals, const MotionGenPlanConfig& plan_config);
+  MotionGenResult plan_fast(const FastCollision& fc, const JointState& start, const std::vector<JointState>& goals, const MotionGenPlanConfig& plan_config, bool allow_gpu = true);
+  MotionGenResult finish_path(const FastCollision& fc, std::vector<std::vector<float>> path, float used_margin, float step_searched, uint64_t seed, const MotionGenPlanConfig& plan_config);
 
   MotionGenConfig config_;
   std::unique_ptr<RobotWorld> robot_world_;
   std::unique_ptr<IKSolver> ik_;
-  uint64_t plan_counter_ = 0;
+  std::atomic<uint64_t> plan_counter_{0};
 };
 
 }  // namespace vkmotion

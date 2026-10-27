@@ -181,6 +181,7 @@ json bench_plan(const json& problems, const cutil::Ref<RobotConfig>& robot, cons
     json row = plan_row(p);
     JointState start = js_of(p["start"]);
     MotionGenPlanConfig plan_cfg;
+    if(const char* e = std::getenv("BENCH_SHORTCUT")) plan_cfg.shortcut_iterations = std::atoi(e);
     const uint64_t checks0 = FastCollision::debug_check_count(), blocks0 = FastCollision::debug_block_count(), edges0 = FastCollision::debug_edge_count();
     auto t0 = Clock::now();
     MotionGenResult res;
@@ -214,6 +215,56 @@ json bench_plan(const json& problems, const cutil::Ref<RobotConfig>& robot, cons
       }
     }
     rows.push_back(row);
+  }
+  return rows;
+}
+
+// バッチ計画: 問題をbatch件ずつまとめてMotionGen::plan_batch_jsで解く。time_msは「バッチの所要時間/件数」(スループット)、batch_msはバッチ全体の所要時間(最悪レイテンシ)。
+json bench_plan_batch(const json& problems, const cutil::Ref<RobotConfig>& robot, const AllowedCollisionMatrix& acm, bool use_vulkan, float margin, size_t batch) {
+  auto world0 = cutil::make_ref<WorldConfig>();
+  MotionGenConfig cfg = MotionGenConfig::load_from_robot_config(robot, world0);
+  cfg.use_vulkan      = use_vulkan;
+  cfg.acm             = acm;
+  cfg.collision_margin = margin;
+  cfg.seed            = 1234;
+  if(const char* e = std::getenv("BENCH_SEARCH_STEP")) cfg.search_step = std::atof(e);
+  MotionGen mg(cfg);
+  mg.warmup();
+  std::vector<cutil::Ref<WorldConfig>> worlds;
+  for(const auto& p : problems) {
+    auto w = cutil::make_ref<WorldConfig>();
+    fill_world(*w, p["objects"]);
+    worlds.push_back(w);
+  }
+  json rows = json::array();
+  for(size_t b0 = 0; b0 < problems.size(); b0 += batch) {
+    const size_t b1 = std::min(problems.size(), b0 + batch);
+    std::vector<MotionGen::BatchProblem> bp;
+    for(size_t i = b0; i < b1; i++) bp.push_back({js_of(problems[i]["start"]), js_of(problems[i]["goal"]), worlds[i]});
+    if(b0 == 0) mg.plan_batch_js(bp);  // 初回(パイプライン・バッファ確保)を計測から外す
+    auto t0 = Clock::now();
+    auto res = mg.plan_batch_js(bp);
+    const double dt = ms_since(t0);
+    for(size_t i = b0; i < b1; i++) {
+      json row         = plan_row(problems[i]);
+      const auto& r    = res[i - b0];
+      row["success"]   = r.success;
+      row["time_ms"]   = dt / static_cast<double>(b1 - b0);
+      row["batch_ms"]  = dt;
+      row["batch_size"] = b1 - b0;
+      if(r.success) {
+        row["path_len"]    = path_len(r.trajectory);
+        row["n_waypoints"] = r.trajectory.size();
+        json path          = json::array();
+        for(const auto& s : r.trajectory) path.push_back(s.position);
+        row["path"] = path;
+        if(!r.interpolated_times.empty()) {
+          row["motion_time_s"] = r.interpolated_times.back();
+          row["times"]         = r.interpolated_times;
+        }
+      }
+      rows.push_back(row);
+    }
   }
   return rows;
 }
@@ -349,6 +400,7 @@ int main(int argc, char** argv) {
   int threads         = 1;
   float margin        = 0.005f;
   std::string only;  // "scene:index"
+  size_t batch = 0;  // >0: 関節ゴール計画をバッチで解く(plan_js のみ)
   for(int i = 3; i < argc; i++) {
     std::string a = argv[i];
     if(a == "--limit" && i + 1 < argc) limit = std::stoi(argv[++i]);
@@ -356,6 +408,7 @@ int main(int argc, char** argv) {
     else if(a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
     else if(a == "--margin" && i + 1 < argc) margin = std::stof(argv[++i]);
     else if(a == "--only" && i + 1 < argc) only = argv[++i];
+    else if(a == "--batch" && i + 1 < argc) batch = static_cast<size_t>(std::stoul(argv[++i]));
     else if(a == "--gpu-search") {}  // 互換用: vulkanバックエンドでは大域探索のGPU化(MotionGenConfig::gpu_search)が既定でオン
     else if(a == "--skip" && i + 1 < argc) {
       std::string s = argv[++i], tok;
@@ -386,7 +439,7 @@ int main(int argc, char** argv) {
     json fc = bench_fk_collision(read_json(data + "/samples.json"), robot, acm, vulkan, true);
     for(auto& [k, v] : fc.items()) res[k] = v;
   }
-  if(!skip.count("js")) res["plan_js"] = bench_plan(problems, robot, acm, vulkan, false, threads, margin);
+  if(!skip.count("js")) res["plan_js"] = batch > 0 ? bench_plan_batch(problems, robot, acm, vulkan, margin, batch) : bench_plan(problems, robot, acm, vulkan, false, threads, margin);
   if(!skip.count("pose")) res["plan_pose"] = bench_plan(problems, robot, acm, vulkan, true, threads, margin);
   if(!skip.count("ik")) res["ik"] = bench_ik(problems, robot, acm);
 

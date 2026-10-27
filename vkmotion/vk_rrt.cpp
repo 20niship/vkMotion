@@ -35,11 +35,12 @@ struct PushConstants {
   uint32_t gmax;
   uint32_t grow;
   uint32_t iters;
+  uint32_t tree_cap;
 };
 
 // shaders/include/rrt_common.glsl と同じ値
 constexpr uint32_t kMaxPoints = 128;   // MAXP
-constexpr uint32_t kTreeCap   = 4096;  // CAP
+constexpr uint32_t kTreeBudgetNodes = 2u << 20;  // 全問題の木(2本ずつ)のノード数の予算(16B/ノード -> 32MB)
 constexpr uint32_t kCtlSolved = 4;
 constexpr uint32_t kCtlMargin = 7;
 constexpr uint32_t kCtlWords  = 16;   // CTL_STRIDE
@@ -82,6 +83,7 @@ VkRrtPipeline::VkRrtPipeline(VkContext& ctx, const GpuRobotData& robot, const st
   group_meta_   = make_buffer(ctx_, robot_.group_meta);
   group_bs_     = make_buffer(ctx_, robot_.group_bs);
   pairs_        = make_buffer(ctx_, robot_.pairs);
+  tree_cap_ = 4096;
   ensure_capacity(1);
 }
 
@@ -93,7 +95,7 @@ void VkRrtPipeline::ensure_capacity(size_t problems) {
   params_   = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * kPrmStride * sizeof(float), true);
   result_   = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * kResStride * sizeof(uint32_t));
   ctl_      = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * kCtlWords * sizeof(uint32_t), true);
-  tree_     = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * 2 * kTreeCap * 16, true);
+  tree_     = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * 2 * tree_cap_ * 16, true);
   boxes_    = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * kMaxBoxes * 24 * sizeof(float), true);
   balls_    = std::make_unique<VkStorageBuffer>(ctx_, capacity_ * kMaxBalls * 8 * sizeof(float), true);
 }
@@ -118,6 +120,13 @@ void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const
   const size_t n   = problems.size();
   results.assign(n, GpuRrtResult{});
   if(n == 0 || n > kMaxBatch) return;
+  // 木の上限ノード数: 問題数が少ないほど大きく(最大4096。これより大きいと最近傍探索が重くなり、リスタートで木を小さく保つ方が速い)、多いと小さく(最小1024)して全体を予算に収める
+  uint32_t cap = 4096;
+  while(cap > 1024 && static_cast<uint64_t>(n) * 2 * cap > kTreeBudgetNodes) cap /= 2;
+  if(cap != tree_cap_) {
+    tree_cap_ = cap;
+    capacity_ = 0;  // 木のバッファを作り直す
+  }
   ensure_capacity(n);
 
   // 問題ごとのパラメータ・世界。入力が不正(ゴール0個/多すぎ、箱が多すぎ)な問題は最初から解けなかったことにする(そのctlは解けた扱いにして走らせない)
@@ -180,6 +189,7 @@ void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const
   pc.gmax         = std::max<uint32_t>(s.max_warps, pc.g0);
   pc.grow         = 1;
   pc.iters        = std::max<uint32_t>(s.iters, 1);
+  pc.tree_cap     = tree_cap_;
 
   std::vector<uint32_t> ctl(n * kCtlWords);
   for(uint32_t submit = 0; submit < s.max_submits; submit++) {

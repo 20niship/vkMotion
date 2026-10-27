@@ -19,6 +19,8 @@ class VkRepairPipeline;
 class VkValidatePipeline;
 class VkRrtPipeline;
 struct GpuRrtSettings;
+struct GpuRrtProblem;
+struct GpuRrtResult;
 
 struct RobotWorldConfig {
   cutil::Ref<RobotConfig> robot_config;
@@ -45,6 +47,8 @@ class RobotWorld {
   // GPU上で双方向RRT-Connectを複数本並列に走らせ、最初に解けた経路を返す(shaders/rrt_gpu.comp)。
   // GPUが使えない/ロボットが非対応(dof>7, 球/直方体以外の障害物など)ならfalseを返し、以後も常にfalse。解けなかった場合もfalse。
   bool gpu_rrt_connect(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings, std::vector<std::vector<float>>& path, float* margin_used = nullptr) const;
+  // 複数の問題(それぞれ別の世界)をGPUでまとめて解く。使えない場合はfalse(resultsは触らない)。
+  bool gpu_rrt_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& settings, std::vector<GpuRrtResult>& results) const;
   bool gpu_rrt_available() const;
 
   // コンパイル済み衝突判定とGPUパイプライン(use_vulkan時)を先に作る。初回呼び出しのレイテンシ(Vulkan初期化・シェーダ読込)を計測/制御ループから外すため。

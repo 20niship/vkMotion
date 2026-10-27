@@ -14,7 +14,7 @@ import vamp.transformations as T
 from common import DATA, RESULTS, load_samples
 from prepare import make_vamp_env, quat_to_wxyz
 
-ORDER = ["vamp", "curobo", "vkmotion-vulkan", "vkmotion-cpu", "vkmotion-cpu-mt", "vkmotion-gpu"]
+ORDER = ["vamp", "curobo", "vkmotion-vulkan", "vkmotion-cpu", "vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-batch"]
 LABEL = {
     "vamp": "VAMP (CPU SIMD, 1 thread)",
     "curobo": "cuRobo v2 (GPU)",
@@ -22,9 +22,10 @@ LABEL = {
     "vkmotion-cpu": "vkMotion (CPU, 1 thread)",
     "vkmotion-cpu-mt": "vkMotion (CPU, 8 threads)",
     "vkmotion-gpu": "vkMotion (GPU探索)",
+    "vkmotion-gpu-batch": "vkMotion (GPUバッチ32, 1問あたり)",
 }
 PLAN_SKIP = {"vkmotion-vulkan"}  # 計画ループの衝突判定は小バッチ(CPU SIMD)なのでVulkan有効でも-cpuと同一経路
-KERNEL_ONCE = {"vkmotion-cpu-mt", "vkmotion-gpu"}  # FK/衝突判定スループットは-cpuと同じ計測なので重複させない
+KERNEL_ONCE = {"vkmotion-cpu-mt", "vkmotion-gpu", "vkmotion-gpu-batch"}  # FK/衝突判定スループットは-cpuと同じ計測なので重複させない
 
 
 def pct(x, p):
@@ -203,24 +204,27 @@ def section_before_after(now, base):
 
 
 NOTES = """
-- **VAMPとの比較(正直なところ)**: 中央値はvkMotion CPUが0.27ms、VAMPが0.34msで、1.3倍ほど速いが「数倍」ではない。簡単な問題が多い`box`/`table_*`では約1.5〜2倍速い。
-  裾は依然としてVAMPが良い(VAMP p95≈0.9ms/p99≈1.6ms、vkMotion CPU 1スレッドはp95≈3.4ms/p99≈5ms、8スレッドで独立シードを競わせるとp95≈2ms/p99≈5ms)。難しいシーン`cage`は、vkMotion CPUの中央値が約1.9ms・上限が約4.2msで、VAMPは0.7ms・上限2.3ms。
-  難しいケースの上限は、以前の20ms近くから、関節ゴールで最大約11ms・姿勢ゴールで約10msまで縮んだが、`cage`ではVAMPの1.5〜2倍遅い。
+- **VAMPとの比較(正直なところ)**: 関節ゴールの中央値はvkMotionが約0.2ms、VAMPが約0.35msで、1.6倍ほど速いが「数倍」ではない。簡単な問題が多い`box`/`table_*`では約2倍速い。
+  裾(p95/p99)は依然としてVAMPが良い(VAMP p95≈0.9ms/p99≈1.7ms。vkMotionはGPU探索を使うGPUが温まっているとp95≈2ms/p99≈3ms、GPUが冷えているとp95≈3〜4ms/p99≈6ms)。
+  難しいシーン`cage`は、vkMotionの中央値が約0.9〜1.9ms、VAMPが約0.7ms。ただし全210問の最大は、以前の20ms近くから、GPUが温まっていれば約3〜4msまで縮んだ(VAMPの最大は約6ms)。
   VAMPの時間は`time_ms`=1回目の実行(plan+simplify)で、`time_ms_median3`は3回の中央値(以前はこちらを使っていたため裾が隠れていた)。
-- **今回効いたこと**: (1) 最近傍探索を8ノードずつのSIMD(次元ごとに並べた鏡)にした(ノード数が数千になる難しい問題で計画時間の3割を占めていた)、
-  (2) ロボット専用のSIMDカーネルを実行時に生成(`gpu_codegen`、FK・境界球・自己衝突ペアをリテラルに展開、`-ffast-math`で0や1の項を畳み込む)、
-  (3) 最初のRRT試行の制限時間を3msから20msに(10〜20msかかる問題が途中で何度も打ち切られていた)、(4) 端点がすれすれで木が伸びないときだけmarginを縮める。
+- **今回効いたこと**: (1) 経路探索の木のバッファがホスト(システム)メモリに置かれていてノードの読み書きがPCIe越しだった。デバイスメモリに置いたところ、GPU探索の難しい問題が数倍速くなった(これが最大の改善)。
+  (2) 最近傍探索を8ノードずつのSIMDにした(CPU)、(3) ロボット専用のSIMD/GPUカーネルを実行時に生成(`gpu_codegen`、FK・境界球・自己衝突ペアをリテラルに展開)、
+  (4) 最初のRRT試行の制限時間を3msから20msに、(5) 端点がすれすれで木が伸びないときだけmarginを縮める、(6) 経路短縮(shortcut)の反復を60回から30回に(経路長は約2%増)。
+- **GPU探索**(`MotionGenConfig::gpu_search`、既定ON): 1本の木を多数のワープで共有して伸ばすVulkan compute版RRT-Connect。ラウンドをdispatchに分けて1回のsubmitに並べる(CUDA graphに相当)。
+  submitの固定費(約0.4ms)があるので、先にCPUで`gpu_handoff_s`(0.3ms)だけ試し、解けなければGPUに渡す。つまり簡単な問題はCPU、難しい問題(上限を決める裾)はGPUが解く。
+  **GPUはアイドルが続くとクロックを数百MHzまで落とし**、間隔を空けて呼ぶGPU探索が2倍近く遅くなる(この表のGPU探索の行がぶれる主因。別のGPUジョブが動いていると逆に温まって速くなる)。
+  `sudo nvidia-smi -lgc <min>,<max>`でクロックを固定すると安定する。補助キューで空回しを流してクロックを維持する案も試したが、計画のdispatchを待たせて逆効果だったので入れていない。
+- **GPUバッチ**(`MotionGen::plan_batch_js`): 問題ごとに別の世界を持つ複数問題を1回のGPU submit列で解く。32問ずつだと全問を解く。1問あたりの時間(バッチ時間/32)は中央値0.46msと単発より長いが、最悪値(p95/p99)は約1.4msと単発より短い(簡単な問題がバッチの完了を待つため中央値は伸び、難しい問題は並列に解くため裾が縮む)。
+  GPU全体の衝突判定スループット(約85M判定/秒)は、CPUのコア約2〜3個分に相当するので、多数の問題をまとめても単発CPUより大きくは速くならない。
 - **まだ差が残る理由**: VAMPの`cage`は約1000反復を0.6msで回す(1反復0.6µs)。vkMotionは1反復あたり約1.8µsで、8コンフィグの衝突判定は約0.5〜0.8µs(VAMPは約0.2µs)。
   残りの大半は箱×リンクグループのブロードフェーズ(1回の判定の約3割)とFK。VAMPのように障害物を距離順に並べて打ち切る、箱をworld軸に揃った場合は回転を省く、といった工夫では速くならなかった。
-- **GPU探索**(`MotionGenConfig::gpu_search`、既定OFF): 1本の木を多数のワープで共有して伸ばすVulkan compute版RRT-Connect。ラウンドをdispatchに分けて1回のsubmitに並べる(CUDA graphに相当)。
-  ロボット専用のGLSLを実行時にglslcで生成して使う(1ワープの衝突判定が約80µs→約35µs)。しかしCPU版が速くなった現在は、submitの固定費(約0.5ms)とGPUの1ラウンドの遅さのため、
-  GPU探索を併用してもp99はCPU単独より悪い(約7ms)。GPUはアイドルが続くとクロックが落ち、疎な呼び出しでは遅くなる。現時点ではCPU版を推奨し、GPU探索は実験的な位置づけ。
 - **精度**: FK・衝突判定(2000サンプル)・姿勢ゴールの末端誤差は各実装で同等(サブマイクロメートル〜0.01mm台、衝突判定はVAMPと100%一致)。`VAMP検証で衝突なし`はVAMP自身・cuRoboも100%ではない。
   サンプリングで検査するプランナーは、障害物に接した経路を作ると別の検証器の検査点では微小に食い込むため。vkMotionは経路の内部点に`collision_margin`(5mm)の余裕を持たせてこれを抑えるが、
-  端点が障害物すれすれで木が伸びないときだけ余裕を縮めるので、その問題では食い込む経路が出うる(98.6〜99%)。
+  端点が障害物すれすれで木が伸びないときだけ余裕を縮めるので、その問題では食い込む経路が出うる(98〜99.5%)。
 - **衝突判定スループット**: 10万config一括ではVulkanバッチ・CPU SIMD(8スレッド)ともcuRoboを上回る。VAMPの値はpythonバインディングの呼び出しオーバーヘッドを含む。
 - **cuRoboとの関係**: cuRoboは姿勢ゴールをGPU上の多シードIK + 多シード軌道最適化(CUDA graph)で解き、PRMグラフは再試行時のシード用。スループット重視で1回数百ms。
-  vkMotionは幾何経路(RRT-Connect)なので2桁速いが、経路は折れ線でjerk制限を持たず、経路長はcuRoboより長い。
+  vkMotionは幾何経路(RRT-Connect)なので3桁速いが、経路は折れ線でjerk制限を持たず、経路長はcuRoboより長い。
 - **IK**: vkMotionは運動学的IKの解を衝突判定で棄却する方式(解析ヤコビアン+LM、多シード)。cuRoboは衝突コストを最適化に含める。
 - **計測の注意**: 他プロセスの負荷は制御していない(冒頭の「計測開始時のマシン負荷」)。以前の版はollamaがCPUを約1000%使っていた状態の数値で、VAMPが約1.5msに見えていたが、
   負荷が無い状態では0.35msだった。GPUも他セッションと共有しており、GPU探索の数値は±数十%ぶれる。cuRoboはmax_attempts=10・graph seed 2回目以降で実行(既定は5)。
