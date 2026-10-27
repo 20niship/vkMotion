@@ -45,6 +45,7 @@ struct MotionGenPlanConfig {
   int max_attempts         = 10;
   bool enable_graph_planner = true;  // trueなら直線補間+局所repairが全滅した後にRRT-Connectフォールバックを試す
   float timeout_seconds    = 5.0f;
+  float shortcut_time_budget_ms = 0.03f;  // 経路短縮に使う時間の上限[ms](0なら無制限)。簡単な問題の計画時間の大半が短縮なので、長さより速さを優先して打ち切る
   int shortcut_iterations  = 30;  // 経路短縮(ランダムな2点を直線で結び直す)の試行回数。増やすと経路が短くなるが時間も増える
 };
 

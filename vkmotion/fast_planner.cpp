@@ -507,10 +507,12 @@ void fast_reduce(const FastCollision& fc, ConfigPath& path, float margin, float 
   path = std::move(out);
 }
 
-void fast_shortcut(const FastCollision& fc, ConfigPath& path, int iterations, uint64_t seed, float margin, float step) {
+void fast_shortcut(const FastCollision& fc, ConfigPath& path, int iterations, uint64_t seed, float margin, float step, double time_budget_s) {
   Rng rng(seed ^ 0xABCDEF);
+  const auto t_start = std::chrono::steady_clock::now();
   const size_t dof = fc.dof();
   for(int it = 0; it < iterations && path.size() >= 3; it++) {
+    if(time_budget_s > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count() > time_budget_s) break;
     int n = static_cast<int>(path.size());
     // 区間の途中の点(辺上のランダム点)同士を結ぶ: 頂点同士だけより短くなりやすい
     int e1 = rng.below(n - 1), e2 = rng.below(n - 1);

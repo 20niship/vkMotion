@@ -10,9 +10,9 @@
 - 衝突球はURDFの`<collision>`プリミティブ(box/cylinder/sphere)から自動生成(メッシュ不要、手動YAMLでの上書きも可能)
 - 衝突判定はCPUリファレンス実装とVulkan compute実装の両方を持ち、相互に結果が一致することをテストで検証
 - IK(解析ヤコビアン+Levenberg-Marquardt)、MoveIt的な「目標Poseへの衝突回避軌道生成」(`MotionGen`)を実装
-- 衝突判定・FK・RRT-Connectは、ロボットごとに専用のSIMD/GPUカーネルを実行時に生成(`vkmotion/gpu_codegen.cpp`)。経路探索の木の伸長と衝突判定はVulkan compute(GPU)でも動き、複数ワープが1本の木を共有して並列に伸ばす。
-  VAMP・cuRoboと同じ衝突球・同じ問題(MotionBenchMaker)で比較すると、FK/衝突判定/IK/経路の精度は同等。関節ゴールの計画時間は、中央値がVAMPと同程度かやや速く(約0.2ms)、cuRoboより3桁速い。
-  難しい問題の上限は数ms〜10ms程度だが、計画時間の裾(p95/p99)はVAMPのほうが短い。軌道の滑らかさ(jerk制限)はcuRoboに及ばない。数値と条件は[bench/RESULTS.md](./bench/RESULTS.md)、測り方は[「ベンチマーク」](#ベンチマークvamp--curobo-との比較)
+- 衝突判定・FK・RRT-Connectは、ロボットごとに専用のSIMD/GPUカーネルを実行時に生成(`vkmotion/gpu_codegen.cpp`)。経路探索は、複数のCPUスレッドが1組の木を共有して並列に伸ばす(既定)。単スレッドのときはVulkan compute(GPU)の探索がCPUと競争する(複数ワープが1本の木を共有して並列に伸ばす)。
+  VAMP・cuRoboと同じ衝突球・同じ問題(MotionBenchMaker)で比較すると、FK/衝突判定/IK/経路の精度は同等。
+  関節ゴールの計画時間は、中央値がVAMPの約1.8倍速く(約0.2ms)、裾(p95/p99)はVAMPと同程度(複数CPUスレッドが共有木を伸ばす既定の構成。VAMPは1スレッド)、cuRoboより3桁速い。軌道の滑らかさ(jerk制限)はcuRoboに及ばない。数値と条件は[bench/RESULTS.md](./bench/RESULTS.md)、測り方は[「ベンチマーク」](#ベンチマークvamp--curobo-との比較)
 - OpenArm(7軸)・SO-101(6軸)・UR5e(6軸)のテスト用URDF(メッシュなし、primitive collisionのみ)を同梱
 
 ## 必要なもの

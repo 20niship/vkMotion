@@ -182,6 +182,7 @@ json bench_plan(const json& problems, const cutil::Ref<RobotConfig>& robot, cons
     JointState start = js_of(p["start"]);
     MotionGenPlanConfig plan_cfg;
     if(const char* e = std::getenv("BENCH_SHORTCUT")) plan_cfg.shortcut_iterations = std::atoi(e);
+    if(const char* e = std::getenv("BENCH_SHORTCUT_MS")) plan_cfg.shortcut_time_budget_ms = static_cast<float>(std::atof(e));
     const uint64_t checks0 = FastCollision::debug_check_count(), blocks0 = FastCollision::debug_block_count(), edges0 = FastCollision::debug_edge_count();
     auto t0 = Clock::now();
     MotionGenResult res;

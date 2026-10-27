@@ -509,7 +509,7 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       if(cand.empty()) break;
       const float m = used_margin;  // 縮めた余裕で見つかった経路は、その余裕で短縮・検証する
       fast_reduce(fc, cand, m, fine_step);
-      fast_shortcut(fc, cand, plan_config.shortcut_iterations, seed, m, fine_step);
+      fast_shortcut(fc, cand, plan_config.shortcut_iterations, seed, m, fine_step, plan_config.shortcut_time_budget_ms * 1e-3);
       // 粗い間隔で探索した経路だけ、細かい間隔で検証し直す(余裕0。余裕込みで検証すると、短縮で辺が分割されて検査点がずれた結果、余裕ぎりぎりの辺が不合格になりうる)。
       // 細かい間隔で探索した経路は探索時の検査をそのまま信頼する。
       const bool trusted = step_of_pass(pass) <= fine_step;
@@ -554,7 +554,7 @@ MotionGenResult MotionGen::finish_path(const FastCollision& fc, std::vector<std:
   const RobotConfig& robot = *config_.robot_config;
   const float fine_step    = config_.collision_step;
   fast_reduce(fc, path, used_margin, fine_step);
-  fast_shortcut(fc, path, plan_config.shortcut_iterations, seed, used_margin, fine_step);
+  fast_shortcut(fc, path, plan_config.shortcut_iterations, seed, used_margin, fine_step, plan_config.shortcut_time_budget_ms * 1e-3);
   if(step_searched > fine_step) {
     for(size_t i = 0; i + 1 < path.size(); i++) {
       if((i + 1 < path.size() - 1 && !fc.is_free_margin(path[i + 1].data(), 0.0f)) || !fc.motion_free(path[i].data(), path[i + 1].data(), 0.0f, false, fine_step)) {

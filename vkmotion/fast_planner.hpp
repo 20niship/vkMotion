@@ -61,7 +61,7 @@ FastRrtResult fast_rrt_connect_parallel(const FastCollision& fc, const std::vect
                                         const std::vector<std::vector<float>>& goals, const FastRrtSettings& settings, RrtThreadPool& pool);
 
 // ランダムな2点を直線で結び直すshortcut。検査はmotion_free(二分法)なので1回あたり数µs〜数十µs。
-void fast_shortcut(const FastCollision& fc, ConfigPath& path, int iterations, uint64_t seed, float margin = 0.0f, float step = 0.0f);
+void fast_shortcut(const FastCollision& fc, ConfigPath& path, int iterations, uint64_t seed, float margin = 0.0f, float step = 0.0f, double time_budget_s = 0.0);
 
 // 先頭から貪欲に「結べる一番遠い点」へ飛ばす(shortcutの前処理。決定的でwaypoint数が一気に減る)。
 void fast_reduce(const FastCollision& fc, ConfigPath& path, float margin = 0.0f, float step = 0.0f);
