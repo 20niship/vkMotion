@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "fast_collision.hpp"
@@ -18,6 +19,7 @@ struct FastRrtSettings {
   float margin        = 0.0f;  // 内部点・新規ノードに持たせる安全余裕[m](start/goalは対象外)
   bool adapt_margin   = true;  // 片方の木が伸びないとき、margin を 1/4 -> 0 と縮めて続ける(結果のmarginに実際に使った値が入る)
   float motion_step   = 0.0f;  // 辺の検査間隔[m](0: FastCollisionの既定)。探索中は粗くして、最終経路を細かく検証し直す使い方を想定
+  std::function<bool()> should_stop;  // 64反復ごとに呼ばれ、trueなら打ち切る(GPU探索が先に解けたか、など)
   const std::atomic<bool>* cancel = nullptr;  // 他スレッドが先に解いたら打ち切る
 };
 

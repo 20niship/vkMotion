@@ -49,6 +49,12 @@ class RobotWorld {
   bool gpu_rrt_connect(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings, std::vector<std::vector<float>>& path, float* margin_used = nullptr) const;
   // 複数の問題(それぞれ別の世界)をGPUでまとめて解く。使えない場合はfalse(resultsは触らない)。
   bool gpu_rrt_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& settings, std::vector<GpuRrtResult>& results) const;
+  // 非同期(1問題)。CPUの探索と並行してGPU探索を走らせる用: begin -> (CPUで別の探索をしながら) poll -> Solvedなら take、CPUが先に解けたら cancel。
+  // begin: GPUが使えない・入力が不正ならfalse。poll: 0=実行中 1=解けた 2=解けなかった/使えない。
+  bool gpu_rrt_async_begin(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings) const;
+  int gpu_rrt_async_poll() const;
+  bool gpu_rrt_async_take(GpuRrtResult& out) const;
+  void gpu_rrt_async_cancel() const;
   bool gpu_rrt_available() const;
 
   // コンパイル済み衝突判定とGPUパイプライン(use_vulkan時)を先に作る。初回呼び出しのレイテンシ(Vulkan初期化・シェーダ読込)を計測/制御ループから外すため。

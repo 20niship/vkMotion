@@ -52,6 +52,10 @@ class VkComputeSequence {
   // 直前までのshader書き込みを、次のdispatch(間接引数の読み出しを含む)から見えるようにする
   void barrier();
   void submit_and_wait();
+  // 待たずにsubmitする。完了は fence_ready() で調べるか wait() で待つ(次のbegin()の前には必ず完了させること)
+  void submit();
+  bool fence_ready() const;
+  void wait();
 
  private:
   VkContext& ctx_;

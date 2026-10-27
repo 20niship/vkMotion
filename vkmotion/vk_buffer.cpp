@@ -31,7 +31,7 @@ VkStorageBuffer::~VkStorageBuffer() {
   if(buffer_) vmaDestroyBuffer(ctx_.allocator(), buffer_, allocation_);
 }
 
-void VkStorageBuffer::upload(const void* data, size_t size_bytes) { std::memcpy(mapped_, data, size_bytes); }
+void VkStorageBuffer::upload(const void* data, size_t size_bytes, size_t offset_bytes) { std::memcpy(static_cast<char*>(mapped_) + offset_bytes, data, size_bytes); }
 
 void VkStorageBuffer::download(void* out, size_t size_bytes, size_t offset_bytes) const { std::memcpy(out, static_cast<const char*>(mapped_) + offset_bytes, size_bytes); }
 

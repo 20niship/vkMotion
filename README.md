@@ -98,7 +98,7 @@ MotionGenResult r = motion_gen.plan_single_js(start, JointState{.position = {1.5
 
 ```cpp
 cfg.gpu_search       = true;    // 既定でオン。大域探索(RRT-Connect)をGPUでも行う。GPUが無ければ自動でCPUのみ
-cfg.gpu_handoff_s    = 0.0003f; // まずCPUでこの秒数だけ試し、解けなければGPUへ渡す(0ならGPU優先)
+cfg.gpu_handoff_s    = 0.0001f; // まずCPUだけでこの秒数試し、解けなければGPU探索を裏で走らせ始める(以降はCPUの探索も続けて、先に解けた方を採る)
 cfg.num_threads      = 1;       // CPU側の探索を独立シードで並列起動する本数(裾を短くしたいとき8など)
 cfg.collision_margin = 0.005f;  // 経路の内部点に持たせる安全余裕[m]
 cfg.seed             = 1234;    // 0なら非決定的、それ以外なら再現可能
@@ -182,7 +182,7 @@ vkMotion/
 ## 既知の制約・今後の課題
 
 - 大域探索(木の伸長・衝突判定)はGPU(Vulkan compute、サブグループ幅32のGPU、dof<=7)でも動く。GPUが使えない・ロボットが対応外(dof>7、衝突球・リンク数の上限超過)なら自動でCPU(SIMD)に戻る。経路の整形・検証・時間パラメタライズ、IKはCPU
-- 計画時間の裾(p95/p99)はVAMPより長い。主因は衝突判定1回の重さ(8コンフィグで約0.5〜0.8µs、VAMPは約0.2µs)。GPU探索は難しい問題の上限を縮めるが、簡単な問題ではsubmitの固定費(約0.4ms)のため、先にCPUで0.3ms試してから渡している
+- 計画時間の裾(p95/p99)はVAMPより長い。主因は衝突判定1回の重さ(8コンフィグで約0.5〜0.8µs、VAMPは約0.2µs)。GPU探索はCPUの探索と競争させている(先にCPUで0.1ms試し、解けなければGPUを裏で走らせたままCPUも続け、先に解けた方を採る)。GPUはアイドルが続くとクロックが落ちるので、間隔を空けた呼び出しでは遅くなる
 - `MotionGen`はcuRoboのL-BFGS/MPPI軌道最適化ではなく幾何経路。速度・加速度制限は守るがjerk制限は未対応で、軌道はcuRoboより少し長い(`bench/RESULTS.md`の経路長)
 - 高速パスの対象外(障害物にconvex/SDF/attached objectを含む)は従来の参照実装(遅い)にフォールバックする。バッチ計画は高速パスの世界(箱・球・円柱・カプセル・平面。GPUは箱32個・球8個まで)のみ
 - 障害物の`Mesh`/`VoxelGrid`(SDF)表現は未対応(プリミティブ形状のみ)

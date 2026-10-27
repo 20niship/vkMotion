@@ -169,6 +169,46 @@ bool RobotWorld::gpu_rrt_batch(const std::vector<GpuRrtProblem>& problems, const
   }
 }
 
+bool RobotWorld::gpu_rrt_async_begin(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings) const {
+  if(!gpu_rrt_available()) return false;
+  const FastCollision* fc = fast_collision();
+  try {
+    std::lock_guard<std::mutex> lock(fast_mutex_);
+    if(!vk_rrt_) {
+      GpuRobotData rd;
+      if(!fc->pack_gpu_robot(rd)) throw std::runtime_error("robot exceeds GPU limits");
+      if(!vk_ctx_) vk_ctx_ = std::make_unique<VkContext>();
+      vk_rrt_         = std::make_unique<VkRrtPipeline>(*vk_ctx_, rd, fc->joint_reach(), config_.robot_config->joint_position_limits_lower(), config_.robot_config->joint_position_limits_upper());
+      vk_rrt_version_ = ~uint64_t{0};
+    }
+    GpuWorldData wd;  // 世界は毎回詰め直す(箱数十個ぶんで数µs)
+    fc->pack_gpu_world(wd);
+    GpuRrtProblem pr;
+    pr.start = start;
+    pr.goals = goals;
+    pr.world = &wd;
+    return vk_rrt_->async_begin(pr, settings);
+  } catch(const std::exception&) {
+    vk_rrt_failed_ = true;
+    return false;
+  }
+}
+
+int RobotWorld::gpu_rrt_async_poll() const {
+  if(!vk_rrt_) return 2;
+  switch(vk_rrt_->async_poll()) {
+    case VkRrtPipeline::Poll::Running: return 0;
+    case VkRrtPipeline::Poll::Solved: return 1;
+    default: return 2;
+  }
+}
+
+bool RobotWorld::gpu_rrt_async_take(GpuRrtResult& out) const { return vk_rrt_ && vk_rrt_->async_take(out); }
+
+void RobotWorld::gpu_rrt_async_cancel() const {
+  if(vk_rrt_) vk_rrt_->async_cancel();
+}
+
 bool RobotWorld::gpu_rrt_available() const {
   if(!config_.use_vulkan || vk_rrt_failed_) return false;
   const FastCollision* fc = fast_collision();

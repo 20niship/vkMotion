@@ -181,6 +181,7 @@ FastRrtResult fast_rrt_connect(const FastCollision& fc, const std::vector<float>
     res.iterations = iter;
     if((iter & 63) == 0) {
       if(st.cancel && st.cancel->load(std::memory_order_relaxed)) return res;
+      if(st.should_stop && st.should_stop()) return res;
       if(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > st.timeout_s) return res;
     }
     if(margin_now > 0.0f && st.adapt_margin && iter >= 256 && (iter & 127) == 0 && std::min(ta.size(), tb.size()) < 3 + static_cast<size_t>(iter) / 128) {

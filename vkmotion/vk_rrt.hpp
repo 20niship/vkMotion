@@ -59,12 +59,30 @@ class VkRrtPipeline {
   // 複数の問題(それぞれ別の世界)を1回のsubmitの列でまとめて解く。results[i]が問題iの結果。
   // 問題あたりのワープ数は settings.first_warps..max_warps(バッチが大きいときは小さくすること。全体で数百〜千ワープが目安)。
   void plan_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& settings, std::vector<GpuRrtResult>& results);
+  // ---- 非同期(1問題): GPU探索を裏で走らせ、CPUが別の探索をしている間に完了を調べる ----
+  enum class Poll { Running, Solved, Failed };
+  // 前のジョブが残っていれば完了を待ってから、問題をアップロードして最初のsubmitを積む(待たずに戻る)。入力が不正ならfalse。
+  bool async_begin(const GpuRrtProblem& problem, const GpuRrtSettings& settings);
+  // 完了を調べる(待たない)。区切りの完了時に未解決で、まだsubmitの余裕があれば続きを積む。Solved/Failedになったらジョブは終わり。
+  Poll async_poll();
+  // Solvedのとき結果(経路・余裕)を取り出す
+  bool async_take(GpuRrtResult& out);
+  // 走っているジョブをやめさせる(ctlに「解けた」を書き込む。ラウンドはすぐ空になる)。完了は待たない(次のasync_begin/planで待つ)
+  void async_cancel();
   bool plan(const std::vector<float>& start, const std::vector<std::vector<float>>& goals, const GpuRrtSettings& settings, std::vector<std::vector<float>>& path, float* margin_used = nullptr);
 
  private:
   VkContext& ctx_;
   GpuRobotData robot_;
   uint32_t gen_ = 0;
+  // 非同期ジョブの状態
+  bool job_active_ = false;       // submit済みで、完了を確認していない
+  bool job_open_   = false;       // 問題が走っている(Solved/Failed/cancelまで)
+  uint32_t job_n_ = 1, job_gen_ = 0, job_chunks_ = 0, job_max_chunks_ = 0, job_rounds_ = 0;
+  std::vector<uint8_t> job_pc_;
+  void wait_job();
+  void submit_chunk();
+  bool prepare(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& s, std::vector<uint8_t>& valid);
   bool specialized_ = false;
   std::vector<float> reach_, lower_, upper_;
   GpuWorldData world_;  // set_world()で渡された世界(plan()が使う)

@@ -392,7 +392,25 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
   auto search = [&](float step) -> ConfigPath {
     FastRrtResult rrt;
     used_margin = margin;
-    if(allow_gpu && config_.gpu_search && robot_world().gpu_rrt_available()) {
+    // GPU探索とCPU探索の競争: 簡単な問題はCPUだけで先に解く(gpu_handoff_s)。解けなければGPU探索を裏で走らせたままCPUの探索を続け、先に解けた方を採る。
+    // (submitが数十µsで戻るので、GPUの固定費はCPUの探索と重なる。GPUが常に温まるのでクロックが落ちにくい副次効果もある)
+    const bool race = allow_gpu && config_.gpu_search && threads == 1 && robot_world().gpu_rrt_available();
+    bool gpu_running = false, gpu_solved = false;
+    auto gpu_poll    = [&]() {
+      if(!gpu_running) return;
+      const int st = robot_world().gpu_rrt_async_poll();
+      if(st == 1) {
+        gpu_solved  = true;
+        gpu_running = false;
+      } else if(st == 2) {
+        gpu_running = false;
+      }
+    };
+    auto gpu_cancel = [&]() {
+      if(gpu_running) robot_world().gpu_rrt_async_cancel();
+      gpu_running = false;
+    };
+    if(race) {
       if(config_.gpu_handoff_s > 0.0f) {
         FastRrtSettings quick;
         quick.margin      = margin;
@@ -407,19 +425,12 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       }
       GpuRrtSettings gs;
       gs.motion_step = step;
-      gs.max_submits = 6;
-      gs.margin = margin;  // 端点がすれすれで木が伸びないときはGPU側が余裕を縮める
-      for(int attempt = 0; attempt < 12 && remaining() > 0.02; attempt++) {
-        gs.seed = static_cast<uint32_t>(seed + 7919ull * static_cast<uint64_t>(attempt));
-        ConfigPath gp;
-        float m  = margin;
-        auto tg  = std::chrono::steady_clock::now();
-        bool gok = robot_world().gpu_rrt_connect(start.position, goal_q, gs, gp, &m);
-        if(gok) {
-          used_margin = m;
-          return gp;
-        }
-      }
+      // 区切りを短く(2ラウンド)して、CPUが先に解けて打ち切ったとき、GPU側の残りの空ラウンドをすぐ終わらせる(次の問題のasync_beginが待たされない)
+      gs.rounds_per_submit = 2;
+      gs.max_submits       = 24;
+      gs.margin      = margin;  // 端点がすれすれで木が伸びないときはGPU側が余裕を縮める
+      gs.seed        = static_cast<uint32_t>(seed);
+      gpu_running    = robot_world().gpu_rrt_async_begin(start.position, goal_q, gs);
     }
     if(threads > 1) {
       // 大半の問題は数msで解けるので、スレッド起動のオーバーヘッドを払う前に1スレッドで短く試す。
@@ -442,6 +453,10 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
       st.timeout_s   = std::min(remaining(), std::min(1.0, 0.02 * std::pow(2.0, attempt)));
       if(threads == 1) {
         st.seed = seed + static_cast<uint64_t>(attempt) * 1000003ull;
+        if(gpu_running) st.should_stop = [&]() {
+          gpu_poll();
+          return gpu_solved;  // GPUが先に解けたら打ち切って、その経路を採る
+        };
         rrt     = fast_rrt_connect(fc, robot.joint_position_limits_lower(), robot.joint_position_limits_upper(), start.position, goal_q, st);
       } else {
         std::atomic<bool> cancel{false};
@@ -461,9 +476,23 @@ MotionGenResult MotionGen::plan_fast(const FastCollision& fc, const JointState& 
           if(r.success && (!rrt.success || r.path.size() < rrt.path.size())) rrt = std::move(r);
         }
       }
-      if(rrt.success) used_margin = rrt.margin;
+      if(rrt.success) {
+        used_margin = rrt.margin;
+        gpu_cancel();
+        break;
+      }
+      gpu_poll();
+      if(gpu_solved) {
+        GpuRrtResult gr;
+        if(robot_world().gpu_rrt_async_take(gr)) {
+          used_margin = gr.margin;
+          return std::move(gr.path);
+        }
+        gpu_solved = false;
+      }
       if(remaining() <= 0.011) break;
     }
+    gpu_cancel();
     return rrt.success ? std::move(rrt.path) : ConfigPath{};
   };
 

@@ -258,18 +258,28 @@ void VkComputeSequence::barrier() {
   vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
-void VkComputeSequence::submit_and_wait() {
+void VkComputeSequence::submit() {
   vkEndCommandBuffer(cmd_);
   vkResetFences(ctx_.device(), 1, &fence_);
   VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit_info.commandBufferCount = 1;
   submit_info.pCommandBuffers    = &cmd_;
   vkQueueSubmit(ctx_.compute_queue(), 1, &submit_info, fence_);
+}
+
+bool VkComputeSequence::fence_ready() const { return vkGetFenceStatus(ctx_.device(), fence_) == VK_SUCCESS; }
+
+void VkComputeSequence::wait() {
   // 数msで終わる処理なので、まず短時間スピンして完了を拾う(ブロッキング待ちはスレッド起床に数十〜百µsかかる)。長引けば通常の待ちに切り替える。
   const auto spin_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
   while(vkGetFenceStatus(ctx_.device(), fence_) == VK_NOT_READY && std::chrono::steady_clock::now() < spin_until) {
   }
   vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, UINT64_MAX);
+}
+
+void VkComputeSequence::submit_and_wait() {
+  submit();
+  wait();
 }
 
 }  // namespace vkmotion

@@ -115,11 +115,10 @@ bool VkRrtPipeline::plan(const std::vector<float>& start, const std::vector<std:
   return true;
 }
 
-void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& s, std::vector<GpuRrtResult>& results) {
+// 問題のアップロードとpush constantの用意(まだsubmitしない)。有効な問題が1つも無ければfalse。
+bool VkRrtPipeline::prepare(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& s, std::vector<uint8_t>& valid) {
   const size_t dof = static_cast<size_t>(robot_.dof);
   const size_t n   = problems.size();
-  results.assign(n, GpuRrtResult{});
-  if(n == 0 || n > kMaxBatch) return;
   // 木の上限ノード数: 問題数が少ないほど大きく(最大4096。これより大きいと最近傍探索が重くなり、リスタートで木を小さく保つ方が速い)、多いと小さく(最小1024)して全体を予算に収める
   uint32_t cap = 4096;
   while(cap > 1024 && static_cast<uint64_t>(n) * 2 * cap > kTreeBudgetNodes) cap /= 2;
@@ -132,7 +131,7 @@ void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const
   // 問題ごとのパラメータ・世界。入力が不正(ゴール0個/多すぎ、箱が多すぎ)な問題は最初から解けなかったことにする(そのctlは解けた扱いにして走らせない)
   std::vector<float> prm(n * kPrmStride, 0.0f), boxes(n * kMaxBoxes * 24, 0.0f), balls(n * kMaxBalls * 8, 0.0f);
   std::vector<uint32_t> ctl0(n * kCtlWords, 0);
-  std::vector<uint8_t> valid(n, 0);
+  valid.assign(n, 0);
   auto put_bits = [](float& f, uint32_t v) { std::memcpy(&f, &v, sizeof(v)); };
   const uint32_t gen = ++gen_;
   size_t active      = 0;
@@ -162,7 +161,7 @@ void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const
     std::copy(pr.world->boxes.begin(), pr.world->boxes.end(), boxes.begin() + static_cast<std::ptrdiff_t>(i * kMaxBoxes * 24));
     std::copy(pr.world->balls.begin(), pr.world->balls.end(), balls.begin() + static_cast<std::ptrdiff_t>(i * kMaxBalls * 8));
   }
-  if(active == 0) return;
+  if(active == 0) return false;
   params_->upload(prm.data(), prm.size() * sizeof(float));
   boxes_->upload(boxes.data(), boxes.size() * sizeof(float));
   balls_->upload(balls.data(), balls.size() * sizeof(float));
@@ -190,17 +189,53 @@ void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const
   pc.grow         = 1;
   pc.iters        = std::max<uint32_t>(s.iters, 1);
   pc.tree_cap     = tree_cap_;
+  job_pc_.assign(reinterpret_cast<const uint8_t*>(&pc), reinterpret_cast<const uint8_t*>(&pc) + sizeof(pc));
+  job_gen_        = gen;
+  job_chunks_     = 0;
+  job_max_chunks_ = s.max_submits;
+  job_rounds_     = s.rounds_per_submit;
+  return true;
+}
+
+// 区切り(rounds_per_submit ラウンド)を1つ積んで待たずにsubmitする。n は直近のprepareの問題数(ctl_の先頭から数える)
+void VkRrtPipeline::submit_chunk() {
+  PushConstants pc;
+  std::memcpy(&pc, job_pc_.data(), sizeof(pc));
+  seq_->begin(&pc, sizeof(pc));
+  for(uint32_t r = 0; r < job_rounds_; r++) {
+    seq_->dispatch(0, job_n_);  // 問題ごとにラウンド間処理
+    seq_->barrier();
+    seq_->dispatch(1, pc.gmax, job_n_);  // (ワープ, 問題)
+    seq_->barrier();
+  }
+  seq_->submit();
+  job_active_ = true;
+  job_chunks_++;
+}
+
+void VkRrtPipeline::wait_job() {
+  if(job_active_) {
+    seq_->wait();
+    job_active_ = false;
+  }
+}
+
+void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const GpuRrtSettings& s, std::vector<GpuRrtResult>& results) {
+  const size_t dof = static_cast<size_t>(robot_.dof);
+  const size_t n   = problems.size();
+  results.assign(n, GpuRrtResult{});
+  if(n == 0 || n > kMaxBatch) return;
+  wait_job();
+  job_open_ = false;
+  std::vector<uint8_t> valid;
+  if(!prepare(problems, s, valid)) return;
+  job_n_ = static_cast<uint32_t>(n);
+  const uint32_t gen = job_gen_;
 
   std::vector<uint32_t> ctl(n * kCtlWords);
-  for(uint32_t submit = 0; submit < s.max_submits; submit++) {
-    seq_->begin(&pc, sizeof(pc));
-    for(uint32_t r = 0; r < s.rounds_per_submit; r++) {
-      seq_->dispatch(0, static_cast<uint32_t>(n));  // 問題ごとにラウンド間処理
-      seq_->barrier();
-      seq_->dispatch(1, pc.gmax, static_cast<uint32_t>(n));  // (ワープ, 問題)
-      seq_->barrier();
-    }
-    seq_->submit_and_wait();
+  while(job_chunks_ < job_max_chunks_) {
+    submit_chunk();
+    wait_job();
     ctl_->download(ctl.data(), ctl.size() * sizeof(uint32_t));
     size_t unsolved = 0;
     for(size_t i = 0; i < n; i++)
@@ -222,6 +257,63 @@ void VkRrtPipeline::plan_batch(const std::vector<GpuRrtProblem>& problems, const
     std::memcpy(&out.margin, &ctl[i * kCtlWords + kCtlMargin], sizeof(float));
     out.solved = true;
   }
+}
+
+bool VkRrtPipeline::async_begin(const GpuRrtProblem& problem, const GpuRrtSettings& s) {
+  wait_job();
+  job_open_ = false;
+  std::vector<uint8_t> valid;
+  if(!prepare({problem}, s, valid)) return false;
+  job_n_    = 1;
+  job_open_ = true;
+  submit_chunk();
+  return true;
+}
+
+VkRrtPipeline::Poll VkRrtPipeline::async_poll() {
+  if(!job_open_) return Poll::Failed;
+  if(job_active_) {
+    if(!seq_->fence_ready()) return Poll::Running;
+    job_active_ = false;
+  }
+  uint32_t ctl[kCtlWords];
+  ctl_->download(ctl, sizeof(ctl));
+  if(ctl[kCtlSolved] >= job_gen_) {
+    job_open_ = false;
+    return Poll::Solved;
+  }
+  if(job_chunks_ >= job_max_chunks_) {
+    job_open_ = false;
+    return Poll::Failed;
+  }
+  submit_chunk();  // 未解決なら続きを積む
+  return Poll::Running;
+}
+
+bool VkRrtPipeline::async_take(GpuRrtResult& out) {
+  out = GpuRrtResult{};
+  wait_job();
+  const size_t dof = static_cast<size_t>(robot_.dof);
+  uint32_t ctl[kCtlWords];
+  ctl_->download(ctl, sizeof(ctl));
+  if(ctl[kCtlSolved] != job_gen_) return false;  // cancel(0xFFFFFFFF)された・他の世代
+  std::vector<uint32_t> r(kResStride);
+  result_->download(r.data(), r.size() * sizeof(uint32_t));
+  const uint32_t k = r[0];
+  if(k < 2 || k > kMaxPoints) return false;
+  out.path.assign(k, std::vector<float>(dof));
+  for(uint32_t a = 0; a < k; a++)
+    for(size_t j = 0; j < dof; j++) std::memcpy(&out.path[a][j], &r[4 + a * 8 + j], sizeof(float));
+  std::memcpy(&out.margin, &ctl[kCtlMargin], sizeof(float));
+  out.solved = true;
+  return true;
+}
+
+void VkRrtPipeline::async_cancel() {
+  if(!job_open_) return;
+  job_open_ = false;
+  const uint32_t all = 0xFFFFFFFFu;
+  ctl_->upload(&all, sizeof(all), kCtlSolved * sizeof(uint32_t));  // 以降のラウンドはすぐ終わる
 }
 
 }  // namespace vkmotion

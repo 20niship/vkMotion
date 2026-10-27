@@ -18,7 +18,7 @@ class VkStorageBuffer {
   VkStorageBuffer(const VkStorageBuffer&)            = delete;
   VkStorageBuffer& operator=(const VkStorageBuffer&) = delete;
 
-  void upload(const void* data, size_t size_bytes);
+  void upload(const void* data, size_t size_bytes, size_t offset_bytes = 0);
   void download(void* out, size_t size_bytes, size_t offset_bytes = 0) const;
 
   VkBuffer handle() const { return buffer_; }
