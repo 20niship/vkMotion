@@ -33,7 +33,7 @@ struct MotionGenConfig {
   float collision_margin = 0.005f;           // 経路の内部点に持たせる安全余裕[m]。0なら障害物に接した経路になりうる
   float gpu_handoff_s = 0.0001f;             // gpu_search時、GPU探索を裏で走らせ始める前に、CPUだけで試す秒数(簡単な問題はGPUを起こさずに終わる)。以降はCPUの探索を続けたまま、先に解けた方を採る
   bool gpu_search = true;                    // 大域探索(RRT-Connect)をGPU(Vulkan compute, shaders/rrt_gpu.comp)でも行う。GPUが使えなければ自動でCPUのみ。難しい問題の計画時間を3分の1程度にする
-  int num_threads = 0;                       // 大域探索(RRT-Connect)で1組の木を共有して伸ばすCPUスレッド数。0=自動(物理コア数相当: hardware_concurrency/2、1〜8)。1なら単スレッドで、gpu_searchが有効ならGPU探索と競争させる。複数スレッドのときはGPU探索は使わない(共有木の方が速い)
+  int num_threads = 1;                       // 大域探索(RRT-Connect)のCPUスレッド数。既定の1は「CPU単スレッド + GPU探索(gpu_search)の競争」で、これが既定の計画経路。2以上(0=自動: hardware_concurrency/2、1〜8)は1組の木を共有するCPUのみの並列探索で、GPUは使わない(ベースライン測定・テスト用)
   int num_ik_goals = 3;                      // 姿勢ゴール時にIKで集める衝突なし解の数(全てをゴール木の根にする)
   uint64_t seed = 0;                         // 0: 非決定的、それ以外: 再現可能
   std::optional<ConstraintSet> constraints;  // nullopt: 制約無視(既定、既存の挙動と完全に同じ)

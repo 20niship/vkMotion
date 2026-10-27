@@ -283,7 +283,7 @@ struct MotionGenConfig {
   float search_step = 0.1f;         // 大域探索(RRT-Connect)の辺の検査間隔[m](球中心の移動量上界)。粗いほど速いが、最終経路は必ずcollision_stepで検証し直す
   float collision_step = 0.05f;     // 経路の短縮・最終検証の辺の検査間隔[m]
   float collision_margin = 0.005f;  // 経路の内部点に持たせる安全余裕[m]
-  int num_threads = 0;              // 大域探索(RRT-Connect)で1組の木を共有して伸ばすCPUスレッド数。0=自動(hardware_concurrency/2、1〜8)
+  int num_threads = 1;              // 既定は単スレッド+GPU探索の競争。0=自動(hardware_concurrency/2、1〜8)/2以上は共有木のCPUのみ並列探索(ベースライン・テスト用)
   bool gpu_search = false;          // 大域探索をGPU(Vulkan compute, shaders/rrt_gpu.comp)でも行う(実験的。CPU版の方が速い場合が多い)
   float gpu_handoff_s = 0.001f;     // gpu_search時、まずCPUでこの秒数だけ試し、解けなければGPUに渡す(0ならGPU優先)
   int num_ik_goals = 3;             // 姿勢ゴール時にIKで集める衝突なし解の数(全部をゴール木の根にする)

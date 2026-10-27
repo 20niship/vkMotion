@@ -19,9 +19,9 @@ LABEL = {
     "vamp": "VAMP (CPU SIMD, 1 thread)",
     "curobo": "cuRobo v2 (GPU)",
     "vkmotion-vulkan": "vkMotion (Vulkan + CPU)",
-    "vkmotion-cpu": "vkMotion (CPU, 1 thread)",
-    "vkmotion-cpu-mt": "vkMotion (CPU, 自動=6スレッド共有木)",
-    "vkmotion-gpu": "vkMotion (GPU探索)",
+    "vkmotion-cpu": "vkMotion (ベースライン: CPUのみ1スレッド)",
+    "vkmotion-cpu-mt": "vkMotion (ベースライン: CPUのみ6スレッド共有木)",
+    "vkmotion-gpu": "vkMotion (既定: GPU探索+CPU競争)",
     "vkmotion-gpu-batch": "vkMotion (GPUバッチ32, 1問あたり)",
 }
 PLAN_SKIP = {"vkmotion-vulkan"}  # 計画ループの衝突判定は小バッチ(CPU SIMD)なのでVulkan有効でも-cpuと同一経路
@@ -204,15 +204,15 @@ def section_before_after(now, base):
 
 
 NOTES = """
-- **VAMPとの比較**: 関節ゴールで、vkMotionの既定(複数CPUスレッドの共有木。この機械では自動で6スレッド)は、VAMP(1スレッド)より全指標で速い: 中央値 0.16ms / 0.35ms(約2.2倍)、p95 0.67ms / 1.0ms、p99 1.2ms / 1.8ms、全210問の最大 3.3ms / 5.6ms。
-  難しい`cage`は中央値 0.48ms / 0.60ms、最大 1.1ms / 2.7ms。ただし**VAMPは1スレッド、vkMotionは6スレッド**なので同じ土俵ではない。1スレッドに限る(`num_threads=1`)と、中央値は同程度に速いが裾はVAMPより長い(p95 3.2ms / p99 7.7ms。GPU探索を競争させるとp95 2.9ms / p99 3.7ms)。
+- **VAMPとの比較**: vkMotionの**既定はGPU探索+CPU競争**(`num_threads=1`)。CPUのみの構成は参考(ベースライン・テスト用)。関節ゴールで、CPUのみ6スレッド共有木(`num_threads=0`)は、VAMP(1スレッド)より全指標で速い: 中央値 0.16ms / 0.35ms(約2.2倍)、p95 0.67ms / 1.0ms、p99 1.2ms / 1.8ms、全210問の最大 3.3ms / 5.6ms。
+  難しい`cage`は中央値 0.48ms / 0.60ms、最大 1.1ms / 2.7ms。ただし**VAMPは1スレッド、vkMotionは6スレッド**なので同じ土俵ではない。CPU1スレッドだと中央値は同程度に速いが裾はVAMPより長い(p95 3.2ms / p99 7.7ms)。既定のGPU探索を競争させるとp95 2.9ms / p99 3.7ms。
   姿勢ゴール(IK込み)の最大は約10ms。VAMPの時間は`time_ms`=1回目の実行(plan+simplify)で、`time_ms_median3`は3回の中央値(以前はこちらを使っていたため裾が隠れていた)。
 - **今回効いたこと**: (0) **複数CPUスレッドが1組の木を共有して伸ばす並列RRT-Connect**(`fast_rrt_connect_parallel`)。追加したノードは公開された時点で他スレッドから見えるので、独立シードを競わせるより同じ時間で作れるノードが多い。1スレッドのp95 3.1ms→0.7ms、p99 8ms→1.2ms。探索スレッドは直前の計画後300µsスピンして待つので、起動の遅延がほとんど無く、簡単な問題にも最初から並列で当たる。(1) 経路探索の木のバッファがホスト(システム)メモリに置かれていてノードの読み書きがPCIe越しだった。デバイスメモリに置いたところ、GPU探索の難しい問題が数倍速くなった(これが最大の改善)。
   (2) 最近傍探索を8ノードずつのSIMDにした(CPU)、(3) ロボット専用のSIMD/GPUカーネルを実行時に生成(`gpu_codegen`、FK・境界球・自己衝突ペアをリテラルに展開)、
   (4) 最初のRRT試行の制限時間を3msから20msに、(5) 端点がすれすれで木が伸びないときだけmarginを縮める、(6) 経路短縮(shortcut)の反復を60回から30回に(経路長は約2%増)。
 - **GPU探索**(`MotionGenConfig::gpu_search`、`num_threads=1`のときだけ使う): 1本の木を多数のワープで共有して伸ばすVulkan compute版RRT-Connect。ラウンドをdispatchに分けて1回のsubmitに並べる(CUDA graphに相当)。
   CPUと**競争**させている: 先にCPUだけで0.1ms試し(`gpu_handoff_s`)、解けなければGPU探索を非同期にsubmitして(数十µs)走らせたまま、CPUの探索も続け、先に解けた方を採る(CPUが先ならGPUはキャンセル)。
-  GPUは単スレッドのCPUの裾(p95 3.1ms→1.6ms)を縮めるが、複数CPUスレッドの共有木の方が速いので、既定(複数スレッド)ではGPUを使わない。
+  GPUは単スレッドのCPUの裾(p95 3.1ms→1.6ms)を縮める。複数CPUスレッドの共有木(ベースライン)の方がさらに速いが、既定はGPU探索とした。
   **GPUはアイドルが続くとクロックを数百MHzまで落とし**、間隔を空けて呼ぶGPU探索が2倍近く遅くなる(この表のGPU探索の行がぶれる主因。別のGPUジョブが動いていると逆に温まって速くなる)。
   `sudo nvidia-smi -lgc <min>,<max>`でクロックを固定すると安定する。補助キューで空回しを流してクロックを維持する案も試したが、計画のdispatchを待たせて逆効果だったので入れていない。
 - **GPUバッチ**(`MotionGen::plan_batch_js`): 問題ごとに別の世界を持つ複数問題を1回のGPU submit列で解く。32問ずつだと全問を解く。1問あたりの時間(バッチ時間/32)は中央値0.46msと単発より長いが、最悪値(p95/p99)は約1.4msと単発より短い(簡単な問題がバッチの完了を待つため中央値は伸び、難しい問題は並列に解くため裾が縮む)。

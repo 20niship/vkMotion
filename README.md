@@ -97,8 +97,8 @@ MotionGenResult r = motion_gen.plan_single_js(start, JointState{.position = {1.5
 主な設定(`MotionGenConfig`。全項目は[MANUAL.md](./MANUAL.md)):
 
 ```cpp
-cfg.num_threads      = 0;       // 大域探索(RRT-Connect)で1組の木を共有して伸ばすCPUスレッド数。0=自動(物理コア数相当、1〜8)。難しい問題の時間が大きく縮む(下のベンチ参照)。1にすると単スレッド
-cfg.gpu_search       = true;    // num_threads=1のとき、大域探索をGPUでも行う(CPUと競争し、先に解けた方を採る)。GPUが無ければ自動でCPUのみ。複数スレッドのときはGPUを使わない(共有木の方が速い)
+cfg.num_threads      = 1;       // 既定: CPU単スレッド + GPU探索の競争。0=自動(物理コア数相当、1〜8)/2以上にすると、1組の木を共有するCPUのみの並列探索(ベースライン測定・テスト用)
+cfg.gpu_search       = true;    // 既定でGPU探索を使う(num_threads=1のとき。CPUと競争し、先に解けた方を採る)。GPUが無ければ自動でCPUのみ。複数スレッドのときはGPUを使わない
 cfg.gpu_handoff_s    = 0.0001f; // 最初にCPU単スレッドだけでこの秒数試す(簡単な問題はここで終わる)。GPU探索はその後に走らせ始める
 cfg.collision_margin = 0.005f;  // 経路の内部点に持たせる安全余裕[m]
 cfg.seed             = 1234;    // 0なら非決定的、それ以外なら再現可能
@@ -182,7 +182,7 @@ vkMotion/
 ## 既知の制約・今後の課題
 
 - 大域探索(木の伸長・衝突判定)はGPU(Vulkan compute、サブグループ幅32のGPU、dof<=7)でも動く。GPUが使えない・ロボットが対応外(dof>7、衝突球・リンク数の上限超過)なら自動でCPU(SIMD)に戻る。経路の整形・検証・時間パラメタライズ、IKはCPU
-- 計画時間の裾(p95/p99)はVAMPより長い。主因は衝突判定1回の重さ(8コンフィグで約0.5〜0.8µs、VAMPは約0.2µs)。`num_threads=1`のときGPU探索はCPUの探索と競争させている(先にCPUで0.1ms試し、解けなければGPUを裏で走らせたままCPUも続け、先に解けた方を採る)。GPUはアイドルが続くとクロックが落ちるので、間隔を空けた呼び出しでは遅くなる。既定(複数CPUスレッドが共有木を伸ばす)ではGPUを使わない。難しい問題の時間はこちらの方が短かった
+- 計画時間の裾(p95/p99)はVAMPより長い。主因は衝突判定1回の重さ(8コンフィグで約0.5〜0.8µs、VAMPは約0.2µs)。`num_threads=1`のときGPU探索はCPUの探索と競争させている(先にCPUで0.1ms試し、解けなければGPUを裏で走らせたままCPUも続け、先に解けた方を採る)。GPUはアイドルが続くとクロックが落ちるので、間隔を空けた呼び出しでは遅くなる。`num_threads=0`(複数CPUスレッドが共有木を伸ばす、GPUは使わない)はベースライン測定用で、難しい問題の時間はこちらの方が短かった
 - `MotionGen`はcuRoboのL-BFGS/MPPI軌道最適化ではなく幾何経路。速度・加速度制限は守るがjerk制限は未対応で、軌道はcuRoboより少し長い(`bench/RESULTS.md`の経路長)
 - 高速パスの対象外(障害物にconvex/SDF/attached objectを含む)は従来の参照実装(遅い)にフォールバックする。バッチ計画は高速パスの世界(箱・球・円柱・カプセル・平面。GPUは箱32個・球8個まで)のみ
 - 障害物の`Mesh`/`VoxelGrid`(SDF)表現は未対応(プリミティブ形状のみ)
